@@ -113,3 +113,64 @@ func TestParsePurchaseHistoryAndMerge(t *testing.T) {
 	}
 }
 
+func TestShortPurchaseTitleDoesNotFalsePositiveMatchFreeGames(t *testing.T) {
+	purchases := []models.PurchaseRecord{
+		{
+			TransactionID:   "347173482651410021",
+			Items:           []string{"Siralim 2", "N++", "Caveblazers"},
+			AcquisitionType: models.AcquisitionBundle,
+			PriceCents:      3831,
+			PriceDisplay:    "$38.31",
+			IsFree:          false,
+			IsBundle:        true,
+		},
+	}
+	licenses := []models.LicenseRecord{
+		{
+			ItemName:          "ChallaChat",
+			AcquisitionMethod: "Complimentary",
+			AcquisitionType:   models.AcquisitionFree,
+		},
+	}
+	owned := []models.LibraryItem{
+		{AppID: 4480260, Name: "ChallaChat", IsFree: true},
+		{AppID: 1021770, Name: "Wanba Warriors", IsFree: false},
+		{AppID: 230270, Name: "N++", IsFree: false},
+	}
+
+	merged := MergeLibraryWithPurchases(owned, purchases, licenses)
+	// ChallaChat must match its Complimentary license / store free flag, NOT "N++"
+	if !merged[0].IsFree || merged[0].AcquisitionType != models.AcquisitionFree || merged[0].MatchedTransaction != "" {
+		t.Errorf("expected ChallaChat to be free/complimentary, got: %+v", merged[0])
+	}
+	// Wanba Warriors (contains 'n') must NOT match "N++" ("n")
+	if merged[1].MatchedTransaction == "347173482651410021" {
+		t.Errorf("expected Wanba Warriors NOT to match N++ bundle transaction, got: %+v", merged[1])
+	}
+	// N++ itself MUST match the bundle transaction via exact match
+	if merged[2].MatchedTransaction != "347173482651410021" || !merged[2].IsBundle {
+		t.Errorf("expected N++ to match bundle transaction, got: %+v", merged[2])
+	}
+}
+
+func TestNonGameTransactionFilteringAndExactLicensePriority(t *testing.T) {
+	marketHTML := `
+	<table class="wallet_history_table">
+	  <tr class="wallet_table_row">
+	    <td class="wht_date">Nov 1, 2025</td>
+	    <td class="wht_items"><div>Steam Community Market</div></td>
+	    <td class="wht_type"><div>Market Transaction</div></td>
+	    <td class="wht_total">$0.05</td>
+	  </tr>
+	  <tr class="wallet_table_row">
+	    <td class="wht_date">Nov 1, 2025</td>
+	    <td class="wht_items"><div>Purchased $10.00 Wallet Credit</div></td>
+	    <td class="wht_type"><div>Purchase</div></td>
+	    <td class="wht_total">$10.00</td>
+	  </tr>
+	</table>`
+	if recs := ParsePurchaseHistoryHTML(marketHTML); len(recs) != 0 {
+		t.Errorf("expected non-game market/wallet rows to be filtered out, got %d", len(recs))
+	}
+}
+

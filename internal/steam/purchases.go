@@ -156,8 +156,8 @@ func ParsePurchaseHistoryHTML(rawHTML string) []models.PurchaseRecord {
 			}
 		}
 
-		// Filter out wallet credit additions that are not game purchases unless relevant
-		if len(rec.Items) == 0 {
+		// Filter out wallet credit additions and Steam Community Market rows that are not game purchases
+		if len(rec.Items) == 0 || isNonGameTransaction(rec.Items) {
 			continue
 		}
 
@@ -267,6 +267,17 @@ func classifyLicenseMethod(method, itemName string) models.AcquisitionType {
 	default:
 		return models.AcquisitionUnknown
 	}
+}
+
+func isNonGameTransaction(items []string) bool {
+	if len(items) == 1 {
+		lower := strings.ToLower(strings.TrimSpace(items[0]))
+		if lower == "steam community market" ||
+			strings.HasPrefix(lower, "purchased ") && strings.Contains(lower, "wallet credit") {
+			return true
+		}
+	}
+	return false
 }
 
 func containsBundleKeyword(items []string) bool {

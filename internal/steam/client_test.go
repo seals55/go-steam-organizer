@@ -48,6 +48,23 @@ func TestClientFullSyncAndMetadataEnrichment(t *testing.T) {
 		case "/dynamicstore/userdata/":
 			_, _ = fmt.Fprint(w, `{"rgOwnedApps":[1145350, 620, 440],"rgOwnedPackages":[1,2]}`)
 
+		case "/IStoreBrowseService/GetItems/v1/":
+			_, _ = fmt.Fprint(w, `{
+				"response": {
+					"store_items": [
+						{
+							"appid": 440,
+							"name": "Team Fortress 2",
+							"is_free": true,
+							"basic_info": {
+								"developers": [{"name": "Valve"}],
+								"publishers": [{"name": "Valve"}]
+							}
+						}
+					]
+				}
+			}`)
+
 		case "/account/history/":
 			_, _ = fmt.Fprint(w, `
 				<script>var g_sessionID = "sess_abc"; var g_historyCursor = {"wallet_txnid":"100","timestamp_newest":1730000000,"balance":"0","currency":1};</script>
@@ -117,6 +134,23 @@ func TestClientFullSyncAndMetadataEnrichment(t *testing.T) {
 	}
 	if len(cache.Items) != 3 {
 		t.Fatalf("expected 3 owned items (2 from API + 1 from dynamicstore), got %d", len(cache.Items))
+	}
+	// Verify that App 440 (only in dynamicstore/userdata, omitted by GetOwnedGames like ChallaChat)
+	// was bulk-resolved via IStoreBrowseService/GetItems/v1 with its real name and free status
+	var foundTF2 bool
+	for _, it := range cache.Items {
+		if it.AppID == 440 {
+			foundTF2 = true
+			if it.Name != "Team Fortress 2" {
+				t.Errorf("expected App 440 placeholder name to be resolved to 'Team Fortress 2', got %q", it.Name)
+			}
+			if !it.IsFree || it.AcquisitionType != models.AcquisitionFree {
+				t.Errorf("expected App 440 to be marked IsFree=true and AcquisitionFree, got IsFree=%v AcquisitionType=%s", it.IsFree, it.AcquisitionType)
+			}
+		}
+	}
+	if !foundTF2 {
+		t.Errorf("expected AppID 440 in synced items")
 	}
 	if len(cache.Purchases) != 2 {
 		t.Fatalf("expected 2 paginated purchases, got %d", len(cache.Purchases))

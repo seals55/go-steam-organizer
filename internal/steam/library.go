@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/csull/go-steam-organizer/internal/models"
@@ -72,8 +73,9 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 		}
 	}
 
-	// 3. Supplement with dynamicstore/userdata owned apps
-	if body, err := c.GetStore(ctx, "/dynamicstore/userdata/"); err == nil {
+	// 3. Supplement with dynamicstore/userdata owned apps (with cache-busting timestamp)
+	dsPath := fmt.Sprintf("/dynamicstore/userdata/?v=%d", time.Now().Unix())
+	if body, err := c.GetStore(ctx, dsPath); err == nil {
 		var ds struct {
 			RgOwnedApps     []uint32 `json:"rgOwnedApps"`
 			RgOwnedPackages []uint32 `json:"rgOwnedPackages"`
@@ -91,6 +93,9 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 		}
 	}
 
+	// 4. Bulk-resolve names, is_free status, developers, and publishers via IStoreBrowseService/GetItems/v1
+	c.bulkEnrichStoreItems(ctx, itemsByApp)
+
 	result := make([]models.LibraryItem, 0, len(itemsByApp))
 	for _, it := range itemsByApp {
 		result = append(result, it)
@@ -99,6 +104,136 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
 	})
 	return result, nil
+}
+
+// bulkEnrichStoreItems queries IStoreBrowseService/GetItems/v1 in batches of 200 AppIDs
+// to populate missing titles ("App <id>"), is_free flags, developers, and publishers.
+func (c *Client) bulkEnrichStoreItems(ctx context.Context, itemsByApp map[uint32]models.LibraryItem) {
+	if len(itemsByApp) == 0 {
+		return
+	}
+
+	appIDs := make([]uint32, 0, len(itemsByApp))
+	for id := range itemsByApp {
+		appIDs = append(appIDs, id)
+	}
+	sort.Slice(appIDs, func(i, j int) bool { return appIDs[i] < appIDs[j] })
+
+	const batchSize = 200
+	var batches [][]uint32
+	for i := 0; i < len(appIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(appIDs) {
+			end = len(appIDs)
+		}
+		batches = append(batches, appIDs[i:end])
+	}
+
+	type storeBrowseItem struct {
+		AppID     uint32 `json:"appid"`
+		Name      string `json:"name"`
+		IsFree    bool   `json:"is_free"`
+		BasicInfo struct {
+			Developers []struct {
+				Name string `json:"name"`
+			} `json:"developers"`
+			Publishers []struct {
+				Name string `json:"name"`
+			} `json:"publishers"`
+		} `json:"basic_info"`
+	}
+
+	var mu sync.Mutex
+	sem := make(chan struct{}, 6)
+	var wg sync.WaitGroup
+
+	for _, batch := range batches {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(ids []uint32) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			type idObj struct {
+				AppID uint32 `json:"appid"`
+			}
+			reqIDs := make([]idObj, len(ids))
+			for i, id := range ids {
+				reqIDs[i] = idObj{AppID: id}
+			}
+			payload := map[string]any{
+				"ids": reqIDs,
+				"context": map[string]any{
+					"language":     "english",
+					"country_code": "US",
+				},
+				"data_request": map[string]any{
+					"include_basic_info": true,
+				},
+			}
+			jb, err := json.Marshal(payload)
+			if err != nil {
+				return
+			}
+			params := url.Values{}
+			params.Set("input_json", string(jb))
+			params.Set("format", "json")
+
+			body, err := c.GetWebAPI(ctx, "IStoreBrowseService/GetItems/v1/", params)
+			if err != nil {
+				return
+			}
+			var resp struct {
+				Response struct {
+					StoreItems []storeBrowseItem `json:"store_items"`
+				} `json:"response"`
+			}
+			if json.Unmarshal(body, &resp) != nil {
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for _, si := range resp.Response.StoreItems {
+				if si.AppID == 0 {
+					continue
+				}
+				existing, ok := itemsByApp[si.AppID]
+				if !ok {
+					continue
+				}
+				if si.Name != "" && (existing.Name == "" || strings.HasPrefix(existing.Name, "App ")) {
+					existing.Name = si.Name
+				}
+				if si.IsFree {
+					existing.IsFree = true
+				}
+				if len(existing.Developers) == 0 && len(si.BasicInfo.Developers) > 0 {
+					for _, d := range si.BasicInfo.Developers {
+						if d.Name != "" {
+							existing.Developers = append(existing.Developers, d.Name)
+						}
+					}
+				}
+				if len(existing.Publishers) == 0 && len(si.BasicInfo.Publishers) > 0 {
+					for _, p := range si.BasicInfo.Publishers {
+						if p.Name != "" {
+							existing.Publishers = append(existing.Publishers, p.Name)
+						}
+					}
+				}
+				itemsByApp[si.AppID] = existing
+			}
+		}(batch)
+	}
+	wg.Wait()
 }
 
 var rgGamesAttrRegex = regexp.MustCompile(`data-profile-gameslist="([^"]+)"`)
@@ -218,15 +353,21 @@ func MergeLibraryWithPurchases(
 
 	result := make([]models.LibraryItem, len(owned))
 	for i, item := range owned {
-		norm := NormalizeTitle(item.Name)
+		wasStoreFree := item.IsFree
+		norm := ""
+		if !strings.HasPrefix(item.Name, "App ") {
+			norm = NormalizeTitle(item.Name)
+		}
 
-		// 1. Check exact or substring match in PurchaseRecords
-		if p, ok := findMatchingPurchase(norm, purchaseByNorm, purchases); ok {
+		_, hasExactLicense := licenseByNorm[norm]
+
+		// 1. Check exact or high-confidence substring match in PurchaseRecords
+		if p, ok := findMatchingPurchase(norm, purchaseByNorm, purchases, hasExactLicense); ok {
 			item.PurchaseDate = p.Date
 			item.AcquisitionType = p.AcquisitionType
 			item.PriceCents = p.PriceCents
 			item.PriceDisplay = p.PriceDisplay
-			item.IsFree = p.IsFree
+			item.IsFree = p.IsFree || wasStoreFree
 			item.IsRefunded = p.IsRefunded
 			item.IsBundle = p.IsBundle
 			item.MatchedTransaction = p.TransactionID
@@ -248,6 +389,14 @@ func MergeLibraryWithPurchases(
 			}
 		}
 
+		// 3. If store metadata indicates the item is free and no paid acquisition was matched, mark as free
+		if item.IsFree && (item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown) {
+			item.AcquisitionType = models.AcquisitionFree
+			if item.PriceDisplay == "" {
+				item.PriceDisplay = "Free"
+			}
+		}
+
 		if item.AcquisitionType == "" {
 			item.AcquisitionType = models.AcquisitionUnknown
 		}
@@ -257,17 +406,20 @@ func MergeLibraryWithPurchases(
 	return result
 }
 
-func findMatchingPurchase(norm string, exactMap map[string]models.PurchaseRecord, all []models.PurchaseRecord) (models.PurchaseRecord, bool) {
+func findMatchingPurchase(norm string, exactMap map[string]models.PurchaseRecord, all []models.PurchaseRecord, hasExactLicense bool) (models.PurchaseRecord, bool) {
 	if norm == "" {
 		return models.PurchaseRecord{}, false
 	}
 	if p, ok := exactMap[norm]; ok {
 		return p, true
 	}
+	if hasExactLicense {
+		return models.PurchaseRecord{}, false
+	}
 	for _, p := range all {
 		for _, rawTitle := range p.Items {
 			cand := NormalizeTitle(rawTitle)
-			if cand != "" && len(norm) >= 4 && (strings.Contains(cand, norm) || strings.Contains(norm, cand)) {
+			if isFuzzyTitleMatch(norm, cand) {
 				return p, true
 			}
 		}
@@ -284,10 +436,26 @@ func findMatchingLicense(norm string, exactMap map[string]models.LicenseRecord, 
 	}
 	for _, lic := range all {
 		cand := NormalizeTitle(lic.ItemName)
-		if cand != "" && len(norm) >= 4 && (strings.Contains(cand, norm) || strings.Contains(norm, cand)) {
+		if isFuzzyTitleMatch(norm, cand) {
 			return lic, true
 		}
 	}
 	return models.LicenseRecord{}, false
+}
+
+// isFuzzyTitleMatch checks whether two normalized titles match on word boundaries with sufficient length and overlap,
+// avoiding false positives from short titles like "N++" ("n") or "Oik" ("oik").
+func isFuzzyTitleMatch(a, b string) bool {
+	if len(a) < 6 || len(b) < 6 {
+		return false
+	}
+	shorter, longer := a, b
+	if len(shorter) > len(longer) {
+		shorter, longer = b, a
+	}
+	if len(shorter)*10 < len(longer)*6 {
+		return false
+	}
+	return strings.Contains(" "+longer+" ", " "+shorter+" ")
 }
 
