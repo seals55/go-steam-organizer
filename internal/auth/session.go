@@ -36,6 +36,9 @@ func ConfigDir() (string, error) {
 		return "", fmt.Errorf("failed to resolve home directory: %w", err)
 	}
 	dir := filepath.Join(home, ".steam-organizer")
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir, nil
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}

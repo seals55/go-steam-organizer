@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,7 @@ const (
 	AcquisitionFree      AcquisitionType = "free"
 	AcquisitionRetailKey AcquisitionType = "retail_key"
 	AcquisitionGift      AcquisitionType = "gift"
+	AcquisitionGiftSent  AcquisitionType = "gift_sent"
 	AcquisitionBundle    AcquisitionType = "bundle"
 	AcquisitionRefunded  AcquisitionType = "refunded"
 	AcquisitionUnknown   AcquisitionType = "unknown"
@@ -42,6 +44,18 @@ type PurchaseRecord struct {
 	IsFree          bool            `json:"is_free"`
 	IsRefunded      bool            `json:"is_refunded"`
 	IsBundle        bool            `json:"is_bundle"`
+	IsGiftForOther  bool            `json:"is_gift_for_other,omitempty"`
+}
+
+// IsOutgoingGift returns true if this purchase history transaction was a gift purchased for another user
+// (e.g., Steam TypeDescription "Gift Purchase Wallet" or "Gift Purchase Visa").
+// Outgoing gift purchases do not grant the item to the buyer's own library and should not classify the buyer's item as a "gift".
+func (p PurchaseRecord) IsOutgoingGift() bool {
+	if p.IsGiftForOther || p.AcquisitionType == AcquisitionGiftSent {
+		return true
+	}
+	descLower := strings.ToLower(p.TypeDescription)
+	return strings.Contains(descLower, "gift")
 }
 
 // LicenseRecord represents an entry from Steam's account licenses / product key activations page.
@@ -89,6 +103,7 @@ type LibraryItem struct {
 	Publishers         []string          `json:"publishers,omitempty"`
 	DeckCompatibility  DeckCompatibility `json:"deck_compatibility,omitempty"`
 	MatchedTransaction string            `json:"matched_transaction,omitempty"`
+	AcquisitionReason  string            `json:"acquisition_reason,omitempty"`
 }
 
 // PlaytimeHours returns the item's total playtime in hours.

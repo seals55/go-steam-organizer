@@ -55,3 +55,23 @@ func TestCollectionContainsApp(t *testing.T) {
 	}
 }
 
+func TestPurchaseRecordIsOutgoingGift(t *testing.T) {
+	p1 := PurchaseRecord{IsGiftForOther: true}
+	if !p1.IsOutgoingGift() {
+		t.Errorf("expected IsGiftForOther=true to be outgoing gift")
+	}
+	p2 := PurchaseRecord{AcquisitionType: AcquisitionGiftSent}
+	if !p2.IsOutgoingGift() {
+		t.Errorf("expected AcquisitionGiftSent to be outgoing gift")
+	}
+	p3 := PurchaseRecord{TypeDescription: "Gift Purchase Wallet"}
+	if !p3.IsOutgoingGift() {
+		t.Errorf("expected 'Gift Purchase Wallet' to be outgoing gift")
+	}
+	p4 := PurchaseRecord{TypeDescription: "Purchase Wallet", AcquisitionType: AcquisitionPurchase}
+	if p4.IsOutgoingGift() {
+		t.Errorf("expected personal 'Purchase Wallet' not to be outgoing gift")
+	}
+}
+
+

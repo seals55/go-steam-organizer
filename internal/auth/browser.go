@@ -336,15 +336,8 @@ func fetchCDPCookies(wsURL string) (map[string]string, error) {
 	}
 }
 
-// loginWithLocalPortal opens a local callback web page and the Steam login page in the user's default browser.
-func loginWithLocalPortal(ctx context.Context, logf func(string, ...any)) (*Session, error) {
-	port, err := getFreePort()
-	if err != nil {
-		return nil, err
-	}
-	portalURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-
-	sessCh := make(chan *Session, 1)
+// newPortalMux creates the HTTP handler for the local browser login callback portal.
+func newPortalMux(sessCh chan<- *Session) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -395,6 +388,19 @@ func loginWithLocalPortal(ctx context.Context, logf func(string, ...any)) (*Sess
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprint(w, portalHTML)
 	})
+	return mux
+}
+
+// loginWithLocalPortal opens a local callback web page and the Steam login page in the user's default browser.
+func loginWithLocalPortal(ctx context.Context, logf func(string, ...any)) (*Session, error) {
+	port, err := getFreePort()
+	if err != nil {
+		return nil, err
+	}
+	portalURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	sessCh := make(chan *Session, 1)
+	mux := newPortalMux(sessCh)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
@@ -434,9 +440,11 @@ func openSystemBrowser(targetURL string) error {
 var personaRegex = regexp.MustCompile(`class="persona_name_text_content"[^>]*>\s*([^<]+?)\s*<`)
 var accountPulldownRegex = regexp.MustCompile(`id="account_pulldown"[^>]*>\s*([^<]+?)\s*<`)
 
+var authHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // enrichSessionMetadata fetches the user's webapi_token and persona name from store.steampowered.com.
 func enrichSessionMetadata(ctx context.Context, sess *Session) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := authHTTPClient
 
 	addCookies := func(req *http.Request) {
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")

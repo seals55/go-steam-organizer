@@ -4,6 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -127,4 +131,86 @@ func TestSessionLifecycleAndValidity(t *testing.T) {
 		t.Errorf("expected error loading session after ClearSession")
 	}
 }
+
+type mockRoundTripper func(req *http.Request) (*http.Response, error)
+
+func (f mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestPortalMuxAndEnrichSessionMetadata(t *testing.T) {
+	sessCh := make(chan *Session, 1)
+	mux := newPortalMux(sessCh)
+
+	// 1. GET / should render portalHTML
+	getReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "go-steam-organizer Login") {
+		t.Errorf("unexpected GET / response: code=%d", getRec.Code)
+	}
+
+	// 2. POST / with invalid cookie should return 400
+	badForm := url.Values{"steamLoginSecure": {"invalid"}}
+	badReq := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(badForm.Encode()))
+	badReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	badRec := httptest.NewRecorder()
+	mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid cookie, got %d", badRec.Code)
+	}
+
+	// 3. POST / with valid steamLoginSecure cookie should send *Session to sessCh
+	jwt := makeTestJWT(time.Now().Add(4 * time.Hour).Unix())
+	validForm := url.Values{
+		"steamLoginSecure": {"76561198000000001||" + jwt},
+		"sessionid":        {"sess_abc"},
+		"apiKey":           {"api_xyz"},
+	}
+	postReq := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(validForm.Encode()))
+	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on valid POST, got %d: %s", postRec.Code, postRec.Body.String())
+	}
+
+	var captured *Session
+	select {
+	case captured = <-sessCh:
+	default:
+		t.Fatal("expected session on sessCh")
+	}
+	if captured.SteamID64 != "76561198000000001" || captured.SessionID != "sess_abc" || captured.APIKey != "api_xyz" {
+		t.Errorf("unexpected captured session: %+v", captured)
+	}
+
+	// 4. Test enrichSessionMetadata with mock HTTP transport
+	origClient := authHTTPClient
+	defer func() { authHTTPClient = origClient }()
+
+	authHTTPClient = &http.Client{
+		Transport: mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			if strings.Contains(req.URL.Path, "ajaxgetasyncconfig") {
+				_, _ = fmt.Fprint(rec, `{"success":1,"data":{"webapi_token":"enriched_webapi_token"}}`)
+			} else if strings.Contains(req.URL.Path, "/account/") {
+				http.SetCookie(rec, &http.Cookie{Name: "sessionid", Value: "from_account_cookie"})
+				_, _ = fmt.Fprint(rec, `<html><body><span id="account_pulldown">EnrichedPlayer</span></body></html>`)
+			}
+			return rec.Result(), nil
+		}),
+	}
+
+	captured.SessionID = ""
+	captured.Cookies["custom_cookie"] = "val"
+	enrichSessionMetadata(t.Context(), captured)
+	if captured.WebAPIToken != "enriched_webapi_token" || captured.PersonaName != "EnrichedPlayer" || captured.SessionID != "from_account_cookie" {
+		t.Errorf("unexpected enriched session: %+v", captured)
+	}
+
+	// Test findChromiumBrowser (smoke check)
+	_ = findChromiumBrowser()
+}
+
 

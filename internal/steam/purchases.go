@@ -183,6 +183,7 @@ func ParsePurchaseHistoryHTML(rawHTML string) []models.PurchaseRecord {
 
 		rec.IsBundle = len(rec.Items) > 1 || containsBundleKeyword(rec.Items)
 		rec.IsFree = rec.PriceCents == 0 && !rec.IsRefunded
+		rec.IsGiftForOther = strings.Contains(strings.ToLower(rec.TypeDescription), "gift")
 		rec.AcquisitionType = classifyPurchaseAcquisition(rec)
 
 		tempRows = append(tempRows, rawParsedRow{rec: rec})
@@ -233,9 +234,10 @@ func classifyPurchaseAcquisition(rec models.PurchaseRecord) models.AcquisitionTy
 	if rec.IsRefunded {
 		return models.AcquisitionRefunded
 	}
-	descLower := strings.ToLower(rec.TypeDescription)
-	if strings.Contains(descLower, "gift") {
-		return models.AcquisitionGift
+	if rec.IsOutgoingGift() {
+		// In Steam's /account/history/, "Gift Purchase ..." rows are gifts bought for OTHER users,
+		// not gifts received into your own library (received gifts appear in /account/licenses/ as "Gift/Guest Pass").
+		return models.AcquisitionGiftSent
 	}
 	if rec.IsBundle {
 		return models.AcquisitionBundle

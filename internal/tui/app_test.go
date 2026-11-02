@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -194,4 +195,202 @@ func TestTUIWorkflowsAndFilters(t *testing.T) {
 		t.Errorf("expected dirtyCols to be false after saving")
 	}
 }
+
+func TestTUIItemDetailsInspector(t *testing.T) {
+	m := newTestTUIModel(t)
+	avpItem := models.LibraryItem{
+		AppID:              3730,
+		Name:               "Aliens versus Predator Classic 2000",
+		PlaytimeMinutes:    45,
+		PurchaseDate:       time.Date(2016, 12, 22, 0, 0, 0, 0, time.UTC),
+		AcquisitionType:    models.AcquisitionPurchase,
+		PriceCents:         124,
+		PriceDisplay:       "$1.24",
+		MatchedTransaction: "347173235088927766",
+		Genres:             []string{"Action"},
+		Developers:         []string{"Rebellion"},
+		Publishers:         []string{"Rebellion"},
+	}
+	m.opts.Items = append([]models.LibraryItem{avpItem}, m.opts.Items...)
+	m.opts.Purchases = []models.PurchaseRecord{
+		{
+			TransactionID:   "347173235088937216",
+			Date:            time.Date(2016, 12, 22, 0, 0, 0, 0, time.UTC),
+			Items:           []string{"Aliens versus Predator Classic 2000"},
+			TypeDescription: "Gift Purchase Wallet",
+			AcquisitionType: models.AcquisitionGiftSent,
+			IsGiftForOther:  true,
+			PriceCents:      124,
+			PriceDisplay:    "$1.24",
+		},
+		{
+			TransactionID:   "347173235088927766",
+			Date:            time.Date(2016, 12, 22, 0, 0, 0, 0, time.UTC),
+			Items:           []string{"Aliens versus Predator Classic 2000"},
+			TypeDescription: "Purchase Wallet",
+			AcquisitionType: models.AcquisitionPurchase,
+			PriceCents:      124,
+			PriceDisplay:    "$1.24",
+		},
+	}
+	m.opts.Licenses = []models.LicenseRecord{
+		{
+			Date:              time.Date(2016, 12, 22, 0, 0, 0, 0, time.UTC),
+			ItemName:          "Aliens versus Predator Classic 2000",
+			AcquisitionMethod: "Steam Store",
+			AcquisitionType:   models.AcquisitionPurchase,
+		},
+	}
+	m.applyFilter()
+
+	// Press 'i' to open Item Details Inspector
+	sendKeyStr(m, "i")
+	if !m.showDetails {
+		t.Fatalf("expected showDetails=true after pressing 'i'")
+	}
+
+	detailsView := m.View()
+	expectedSubstrings := []string{
+		"ITEM DETAILS & PROVENANCE: Aliens versus Predator Classic 2000 (AppID: 3730)",
+		"WHY IS THIS ITEM CLASSIFIED AS \"PURCHASE\"?",
+		"347173235088937216",
+		"Gift Purchase Wallet",
+		"[GIFT FOR OTHER - IGNORED]",
+		"347173235088927766",
+		"Purchase Wallet",
+		"Matching Purchase History Transactions (2):",
+		"Matching Account Licenses (1):",
+		"Rebellion",
+	}
+	for _, want := range expectedSubstrings {
+		if !strings.Contains(detailsView, want) {
+			t.Errorf("expected details view to contain %q, got:\n%s", want, detailsView)
+		}
+	}
+
+	// Close details view with Esc
+	sendKeyStr(m, "esc")
+	if m.showDetails {
+		t.Errorf("expected showDetails=false after pressing Esc")
+	}
+}
+
+func TestTUINavigationMessagesAndEdgeCases(t *testing.T) {
+	m := newTestTUIModel(t)
+	_ = m.Init()
+
+	// 1. Render Library tab directly in normal mode
+	libView := m.View()
+	if !strings.Contains(libView, "Hades II") || !strings.Contains(libView, "Portal 2") {
+		t.Errorf("expected Library view to render Hades II and Portal 2")
+	}
+
+	// 2. Cursor navigation (down, up, pgdown, pgup) across all 3 tabs
+	sendKeyStr(m, "j")
+	if m.cursor != 1 {
+		t.Errorf("expected cursor=1 after 'j', got %d", m.cursor)
+	}
+	sendKeyStr(m, "k")
+	if m.cursor != 0 {
+		t.Errorf("expected cursor=0 after 'k', got %d", m.cursor)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+
+	// Quick filters 3, 4, 5, 6 and additional filter tokens (played, free, refunded, bundle, hours>)
+	for _, qk := range []string{"3", "4", "5", "6", "1"} {
+		sendKeyStr(m, qk)
+	}
+	m.filterQuery = "played free refunded bundle hours>1"
+	m.applyFilter()
+	m.filterQuery = ""
+	m.applyFilter()
+
+	// Live filter input mode ('/'), typing, Enter, and Esc
+	sendKeyStr(m, "/")
+	if m.mode != modeFilter {
+		t.Fatalf("expected modeFilter after '/'")
+	}
+	_ = m.View()
+	sendKeyStr(m, "P")
+	sendKeyStr(m, "enter")
+	if m.filterQuery != "P" {
+		t.Errorf("expected filterQuery='P', got %q", m.filterQuery)
+	}
+	sendKeyStr(m, "/")
+	sendKeyStr(m, "esc")
+	if m.mode != modeNormal {
+		t.Errorf("expected modeNormal after Esc")
+	}
+	sendKeyStr(m, "c")
+
+	// Empty collection name error in modeAssignCollection and modeNewCollection
+	sendKeyStr(m, "a")
+	m.textInput.SetValue("   ")
+	sendKeyStr(m, "enter")
+	if !m.statusErr {
+		t.Errorf("expected statusErr=true for empty collection name")
+	}
+	_ = m.View()
+
+	// Navigate to Collections tab and move cursor
+	m.opts.ColManager.EnsureCollection("Col A")
+	m.opts.ColManager.EnsureCollection("Col B")
+	sendKeyStr(m, "tab")
+	sendKeyStr(m, "j")
+	sendKeyStr(m, "k")
+	sendKeyStr(m, "n")
+	m.textInput.SetValue("")
+	sendKeyStr(m, "enter")
+
+	// Navigate to Rules tab and move cursor, then shift+tab back
+	sendKeyStr(m, "tab")
+	sendKeyStr(m, "j")
+	sendKeyStr(m, "k")
+	sendKeyStr(m, "shift+tab")
+	if m.tab != tabCollections {
+		t.Errorf("expected tabCollections after shift+tab, got %v", m.tab)
+	}
+	sendKeyStr(m, "shift+tab")
+
+	// Test async Tea messages (statusMsg, syncCompleteMsg, loginCompleteMsg)
+	m.Update(statusMsg{text: "Custom status", isErr: false})
+	m.Update(syncCompleteMsg{err: context.DeadlineExceeded})
+	if !m.statusErr {
+		t.Errorf("expected statusErr on sync error")
+	}
+	m.Update(syncCompleteMsg{
+		items:     m.opts.Items,
+		purchases: []models.PurchaseRecord{{TransactionID: "1"}},
+		licenses:  []models.LicenseRecord{{ItemName: "Portal 2"}},
+	})
+	if m.statusErr {
+		t.Errorf("expected statusErr=false on sync success")
+	}
+	m.Update(loginCompleteMsg{err: context.Canceled})
+	if !m.statusErr {
+		t.Errorf("expected statusErr on login error")
+	}
+	m.Update(loginCompleteMsg{sess: &auth.Session{PersonaName: "NewUser", SteamID64: "76561198000000002"}})
+	if m.opts.Session.PersonaName != "NewUser" {
+		t.Errorf("expected session updated to NewUser")
+	}
+
+	// Test r, m, l, q commands and truncateStr edge cases
+	sendKeyStr(m, "r")
+	m.busy = false
+	sendKeyStr(m, "m")
+	m.busy = false
+	sendKeyStr(m, "l")
+	m.busy = false
+	if got := truncateStr("abcdef", 2); got != "ab" {
+		t.Errorf("expected truncateStr('abcdef', 2) == 'ab', got %q", got)
+	}
+	if got := truncateStr("abcdefghij", 6); got != "abc..." {
+		t.Errorf("expected 'abc...', got %q", got)
+	}
+	sendKeyStr(m, "q")
+}
+
+
 

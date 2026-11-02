@@ -209,5 +209,133 @@ func TestBulkEnrichStoreItemsRetriesOnHTTP429(t *testing.T) {
 	if items[4480260].Name != "ChallaChat" || !items[4480260].IsFree {
 		t.Errorf("expected ChallaChat to be enriched after HTTP 429 retry, got %+v", items[4480260])
 	}
+	if client.Session() != sess {
+		t.Errorf("expected client.Session() to return sess")
+	}
 }
+
+func TestLocalVDFInlineV28AndHelpers(t *testing.T) {
+	tmpSteam := t.TempDir()
+	appcacheDir := filepath.Join(tmpSteam, "appcache")
+	if err := os.MkdirAll(appcacheDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEAM_PATH", tmpSteam)
+	if got := detectLocalSteamDir(); got != tmpSteam {
+		t.Errorf("expected detectLocalSteamDir to return STEAM_PATH %q, got %q", tmpSteam, got)
+	}
+
+	// Test vdfAsInt across all supported types
+	if vdfAsInt(int(42)) != 42 || vdfAsInt(int32(7)) != 7 || vdfAsInt(uint64(99)) != 99 || vdfAsInt("123") != 123 || vdfAsInt(nil) != 0 {
+		t.Errorf("unexpected vdfAsInt conversions")
+	}
+
+	// Build v27/v28 packageinfo.vdf (magic 0x06565527 -> 24-byte header skip) with billingtype=1 (paid) and pkg 0
+	var pkgBuf bytes.Buffer
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint32(0x06565527))
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint32(1))
+
+	// Package 0 (should be skipped)
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint32(0))
+	pkgBuf.Write(make([]byte, 24))
+	pkgBuf.WriteByte(0x08)
+
+	// Package 555: billingtype=1 (paid), extended.freepromotion=0, appids={0: 777}
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint32(555))
+	pkgBuf.Write(make([]byte, 24))
+	pkgBuf.WriteByte(0x02)
+	pkgBuf.WriteString("billingtype\x00")
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, int32(1))
+	pkgBuf.WriteByte(0x06) // 64-bit field test
+	pkgBuf.WriteString("token64\x00")
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint64(123456))
+	pkgBuf.WriteByte(0x00)
+	pkgBuf.WriteString("appids\x00")
+	pkgBuf.WriteByte(0x02)
+	pkgBuf.WriteString("0\x00")
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, int32(777))
+	pkgBuf.WriteByte(0x08)
+	pkgBuf.WriteByte(0x08)
+	_ = binary.Write(&pkgBuf, binary.LittleEndian, uint32(0xFFFFFFFF))
+
+	if err := os.WriteFile(filepath.Join(appcacheDir, "packageinfo.vdf"), pkgBuf.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build inline appinfo.vdf (v28: 0x07564428 without string table) for AppID 777
+	var vdfB bytes.Buffer
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("appinfo\x00")
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("common\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("name\x00Paid Inline Game\x00")
+	// genres map with genre 1 (Action)
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("genres\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("0\x001\x00")
+	vdfB.WriteByte(0x08)
+	// associations map with developer & publisher (and duplicate developer to test appendUniqueStr)
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("associations\x00")
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("0\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("type\x00developer\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("name\x00InlineDev\x00")
+	vdfB.WriteByte(0x08)
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("1\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("type\x00publisher\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("name\x00InlinePub\x00")
+	vdfB.WriteByte(0x08)
+	vdfB.WriteByte(0x08)
+	// steam_deck_compatibility = 1 (Unsupported)
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("steam_deck_compatibility\x00")
+	vdfB.WriteByte(0x02)
+	vdfB.WriteString("category\x00")
+	_ = binary.Write(&vdfB, binary.LittleEndian, int32(1))
+	vdfB.WriteByte(0x08)
+	vdfB.WriteByte(0x08) // end common
+	vdfB.WriteByte(0x00)
+	vdfB.WriteString("extended\x00")
+	vdfB.WriteByte(0x01)
+	vdfB.WriteString("developer\x00InlineDev\x00")
+	vdfB.WriteByte(0x08) // end extended
+	vdfB.WriteByte(0x08) // end appinfo
+	vdfB.WriteByte(0x08) // end root
+
+	var appFile bytes.Buffer
+	_ = binary.Write(&appFile, binary.LittleEndian, uint32(0x07564428))
+	_ = binary.Write(&appFile, binary.LittleEndian, uint32(1))
+	_ = binary.Write(&appFile, binary.LittleEndian, uint32(777))
+	_ = binary.Write(&appFile, binary.LittleEndian, uint32(60+vdfB.Len()))
+	appFile.Write(make([]byte, 60))
+	appFile.Write(vdfB.Bytes())
+	_ = binary.Write(&appFile, binary.LittleEndian, uint32(0))
+
+	if err := os.WriteFile(filepath.Join(appcacheDir, "appinfo.vdf"), appFile.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	items := map[uint32]models.LibraryItem{
+		777: {AppID: 777, Name: "App 777", AcquisitionType: models.AcquisitionUnknown},
+	}
+	if n := EnrichFromLocalSteamCache(items, ""); n != 1 {
+		t.Fatalf("expected 1 enriched item from STEAM_PATH v28 cache, got %d", n)
+	}
+	got := items[777]
+	if got.Name != "Paid Inline Game" || got.AcquisitionType != models.AcquisitionPurchase || got.DeckCompatibility != models.DeckUnsupported {
+		t.Errorf("unexpected v28 inline item enrichment: %+v", got)
+	}
+	if len(got.Developers) != 1 || got.Developers[0] != "InlineDev" || len(got.Publishers) != 1 || got.Publishers[0] != "InlinePub" {
+		t.Errorf("unexpected associations dev/pub: %+v", got)
+	}
+}
+
 

@@ -338,10 +338,24 @@ func applyAppInfoToLibraryItem(
 		if item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown {
 			item.AcquisitionType = models.AcquisitionFree
 			item.PriceDisplay = "Free"
+			switch {
+			case isFreeApp:
+				item.AcquisitionReason = "Local Steam appinfo.vdf (extended.isfreeapp=1)"
+			case hasFreeGenre:
+				item.AcquisitionReason = "Local Steam appinfo.vdf (Genre 37: Free to Play)"
+			default:
+				item.AcquisitionReason = "Local Steam packageinfo.vdf (FreeOnDemand / Complimentary package)"
+			}
 		}
 	} else if inRetailPkg && !inPaidPkg {
 		if item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown {
 			item.AcquisitionType = models.AcquisitionRetailKey
+			item.AcquisitionReason = "Local Steam packageinfo.vdf (BillingType=3 Retail CD Key / Promo)"
+		}
+	} else if inPaidPkg {
+		if item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown {
+			item.AcquisitionType = models.AcquisitionPurchase
+			item.AcquisitionReason = "Local Steam packageinfo.vdf (BillingType=1 Paid Steam Store Package)"
 		}
 	}
 

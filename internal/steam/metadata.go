@@ -29,11 +29,7 @@ func metadataCachePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cacheDir := filepath.Join(dir, "cache")
-	if err := os.MkdirAll(cacheDir, 0700); err != nil {
-		return "", err
-	}
-	return filepath.Join(cacheDir, "metadata_cache.json"), nil
+	return filepath.Join(dir, "cache", "metadata_cache.json"), nil
 }
 
 // LoadMetadataStore loads cached store metadata from disk.
@@ -65,6 +61,9 @@ func (ms *MetadataStore) Save() error {
 	}
 	path, err := metadataCachePath()
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(ms, "", "  ")

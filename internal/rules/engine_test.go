@@ -172,4 +172,29 @@ rules:
 	if _, err := FilterItems(nil, Criteria{NameRegex: "[unclosed"}); err == nil {
 		t.Errorf("expected error for invalid NameRegex")
 	}
+
+	// Test missing file & malformed YAML/JSON & template error
+	if _, err := LoadConfigFile(filepath.Join(tmpDir, "missing.yaml")); err == nil {
+		t.Errorf("expected error for missing rules file")
+	}
+	badJSON := filepath.Join(tmpDir, "bad.json")
+	_ = os.WriteFile(badJSON, []byte("{bad"), 0644)
+	if _, err := LoadConfigFile(badJSON); err == nil {
+		t.Errorf("expected error for invalid JSON rules file")
+	}
+	badYAML := filepath.Join(tmpDir, "bad.yaml")
+	_ = os.WriteFile(badYAML, []byte(":\n  - :\n\tinvalid"), 0644)
+	if _, err := LoadConfigFile(badYAML); err == nil {
+		t.Errorf("expected error for invalid YAML rules file")
+	}
+	if res, err := EvaluateRules([]models.LibraryItem{{AppID: 1, Name: "Test"}}, &ConfigFile{
+		Rules: []Rule{{Name: "BadTpl", Collection: "{{.Unclosed"}},
+	}); err != nil || len(res[0].CollectionMatches) != 0 {
+		t.Errorf("expected invalid collection template to be skipped cleanly, got err=%v matches=%v", err, res)
+	}
+	if _, err := EvaluateRules([]models.LibraryItem{{AppID: 1, Name: "Test"}}, &ConfigFile{
+		Rules: []Rule{{Name: "BadRegex", Collection: "Col", Criteria: Criteria{NameRegex: "[unclosed"}}},
+	}); err == nil {
+		t.Errorf("expected EvaluateRules to return error on invalid NameRegex")
+	}
 }

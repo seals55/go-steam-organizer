@@ -72,6 +72,9 @@ func TestCollectionManagerLoadAddRemoveSave(t *testing.T) {
 	if len(reloaded.rawEntries) != 3 {
 		t.Errorf("expected 3 total raw entries (1 showcase + 2 collections), got %d", len(reloaded.rawEntries))
 	}
+	if reloaded.FilePath() != csFile {
+		t.Errorf("expected FilePath %q, got %q", csFile, reloaded.FilePath())
+	}
 	favReloaded := reloaded.FindByNameOrID("Favorites")
 	if favReloaded == nil || favReloaded.ContainsApp(440) || !favReloaded.ContainsApp(620) {
 		t.Errorf("unexpected Favorites state after reload: %+v", favReloaded)

@@ -170,11 +170,7 @@ func libraryCachePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cacheDir := filepath.Join(dir, "cache")
-	if err := os.MkdirAll(cacheDir, 0700); err != nil {
-		return "", err
-	}
-	return filepath.Join(cacheDir, "library_cache.json"), nil
+	return filepath.Join(dir, "cache", "library_cache.json"), nil
 }
 
 // LoadLibraryCache reads the cached library & purchases snapshot if available.
@@ -201,6 +197,9 @@ func LoadLibraryCache(steamID64 string) (*LibraryCache, error) {
 func SaveLibraryCache(cache *LibraryCache) error {
 	path, err := libraryCachePath()
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cache, "", "  ")

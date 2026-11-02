@@ -39,6 +39,8 @@ type Options struct {
 	Client           *steam.Client
 	ColManager       *collections.Manager
 	Items            []models.LibraryItem
+	Purchases        []models.PurchaseRecord
+	Licenses         []models.LicenseRecord
 	RulesConfig      *rules.ConfigFile
 	RulesFilePath    string
 	CloudStoragePath string
@@ -50,8 +52,10 @@ type statusMsg struct {
 }
 
 type syncCompleteMsg struct {
-	items []models.LibraryItem
-	err   error
+	items     []models.LibraryItem
+	purchases []models.PurchaseRecord
+	licenses  []models.LicenseRecord
+	err       error
 }
 
 type loginCompleteMsg struct {
@@ -64,6 +68,7 @@ type Model struct {
 	opts          Options
 	tab           activeTab
 	mode          inputMode
+	showDetails   bool
 	width         int
 	height        int
 	cursor        int
@@ -94,7 +99,7 @@ func Run(opts Options) error {
 		selectedApps:  make(map[uint32]bool),
 		filteredItems: opts.Items,
 		textInput:     ti,
-		status:        "Ready. Press '/' to filter, Space to select, 'a' to add to collection, 's' to save.",
+		status:        "Ready. Press '/' to filter, Enter/'i' for item details, Space to select, 'a' to add to collection, 's' to save.",
 	}
 	m.applyFilter()
 
@@ -128,6 +133,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.opts.Items = msg.items
+		if msg.purchases != nil {
+			m.opts.Purchases = msg.purchases
+		}
+		if msg.licenses != nil {
+			m.opts.Licenses = msg.licenses
+		}
 		m.applyFilter()
 		m.status = fmt.Sprintf("Synced %d library items with purchase & license history!", len(msg.items))
 		m.statusErr = false
@@ -229,11 +240,34 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 
+	case "esc", "backspace":
+		if m.showDetails {
+			m.showDetails = false
+			m.status = "Closed item details."
+			m.statusErr = false
+			return m, nil
+		}
+
+	case "enter", "i", "d":
+		if m.tab == tabLibrary && len(m.filteredItems) > 0 && m.cursor < len(m.filteredItems) {
+			m.showDetails = !m.showDetails
+			if m.showDetails {
+				it := m.filteredItems[m.cursor]
+				m.status = fmt.Sprintf("Inspecting %q (AppID %d). Press Esc/Enter/'i' to return, Up/Down to step through items.", it.Name, it.AppID)
+			} else {
+				m.status = "Closed item details."
+			}
+			m.statusErr = false
+			return m, nil
+		}
+
 	case "tab":
+		m.showDetails = false
 		m.tab = (m.tab + 1) % 3
 		return m, nil
 
 	case "shift+tab":
+		m.showDetails = false
 		m.tab = (m.tab + 2) % 3
 		return m, nil
 
@@ -385,7 +419,11 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return syncCompleteMsg{err: err}
 			}
 			enriched := client.EnrichItems(context.Background(), cache.Items, false, 0, nil)
-			return syncCompleteMsg{items: enriched}
+			return syncCompleteMsg{
+				items:     enriched,
+				purchases: cache.Purchases,
+				licenses:  cache.Licenses,
+			}
 		}
 
 	case "m":
@@ -704,7 +742,11 @@ func (m *Model) View() string {
 	listRows := maxInt(8, m.height-12)
 	switch m.tab {
 	case tabLibrary:
-		b.WriteString(m.renderLibraryTab(listRows))
+		if m.showDetails {
+			b.WriteString(m.renderItemDetails())
+		} else {
+			b.WriteString(m.renderLibraryTab(listRows))
+		}
 	case tabCollections:
 		b.WriteString(m.renderCollectionsTab(listRows))
 	case tabRules:
@@ -718,10 +760,137 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString("  " + statusStyle.Render(m.status) + "\n")
 	}
-	help := "  Keys: [Tab] Switch View  [/] Filter  [Space] Select  [Ctrl+A] Select All  [a] Add to Collection  [s] Save  [r] Sync Steam  [m] Fetch Metadata  [l] Login  [q] Quit"
+	help := "  Keys: [Tab] Switch View  [/] Filter  [Enter/i] Details  [Space] Select  [Ctrl+A] All  [a] Add to Col  [s] Save  [r] Sync  [m] Metadata  [l] Login  [q] Quit"
 	b.WriteString(subtleStyle.Render(help))
 
 	return b.String()
+}
+
+func (m *Model) renderItemDetails() string {
+	if len(m.filteredItems) == 0 || m.cursor >= len(m.filteredItems) {
+		return "  No item selected.\n"
+	}
+	it := m.filteredItems[m.cursor]
+
+	var b strings.Builder
+	b.WriteString(selectedRowStyle.Render(fmt.Sprintf("  ITEM DETAILS & PROVENANCE: %s (AppID: %d)  [Item %d of %d]", it.Name, it.AppID, m.cursor+1, len(m.filteredItems))) + "\n")
+	b.WriteString(subtleStyle.Render("  "+strings.Repeat("-", 105)) + "\n")
+
+	// 1. Overview
+	lastPlayed := "Never (Unplayed)"
+	if !it.LastPlayed.IsZero() {
+		lastPlayed = it.LastPlayed.Format("2006-01-02")
+	}
+	deckStr := string(it.DeckCompatibility)
+	if deckStr == "" {
+		deckStr = "unknown"
+	}
+	b.WriteString(fmt.Sprintf("  Playtime:           %.1f hours (%d mins)  |  Last Played: %s  |  Steam Deck: %s\n",
+		it.PlaytimeHours(), it.PlaytimeMinutes, lastPlayed, deckStr))
+
+	// 2. Acquisition & Classification Provenance
+	b.WriteString("\n")
+	b.WriteString(selectedRowStyle.Render("  WHY IS THIS ITEM CLASSIFIED AS \""+strings.ToUpper(string(it.AcquisitionType))+"\"?") + "\n")
+
+	acqDate := "-"
+	if !it.PurchaseDate.IsZero() {
+		acqDate = it.PurchaseDate.Format("2006-01-02")
+	}
+	txID := it.MatchedTransaction
+	if txID == "" {
+		txID = "-"
+	}
+	b.WriteString(fmt.Sprintf("  Acquisition Type:   %-12s  |  Summary Price: %-10s  |  Date: %-12s  |  Matched TxID: %s\n",
+		it.AcquisitionType, it.SummaryPrice(), acqDate, txID))
+	b.WriteString(fmt.Sprintf("  Flags:              IsFree=%v  |  IsBundle=%v  |  IsRefunded=%v\n",
+		it.IsFree, it.IsBundle, it.IsRefunded))
+
+	matchedPurchases, matchedLicenses, explanation := steam.ExplainItemAcquisition(it, m.opts.Purchases, m.opts.Licenses)
+	b.WriteString(fmt.Sprintf("  Reason:             %s\n", explanation))
+
+	// Matching Purchase History Rows
+	b.WriteString(fmt.Sprintf("\n  Matching Purchase History Transactions (%d):\n", len(matchedPurchases)))
+	if len(matchedPurchases) == 0 {
+		b.WriteString(subtleStyle.Render("    (No matching transactions in Steam /account/history/)") + "\n")
+	} else {
+		for idx, p := range matchedPurchases {
+			badge := "   "
+			if p.TransactionID != "" && p.TransactionID == it.MatchedTransaction {
+				badge = "[*]"
+			} else if it.MatchedTransaction == "" && !p.IsOutgoingGift() && idx == 0 {
+				badge = "[*]"
+			}
+			extraTag := ""
+			if p.IsRefunded {
+				extraTag = " [REFUNDED]"
+			} else if p.IsOutgoingGift() {
+				extraTag = " [GIFT FOR OTHER - IGNORED]"
+			}
+			b.WriteString(fmt.Sprintf("    %s %s  |  TxID: %-20s  |  Steam Type: %-22q -> %-10s  |  Price: %s%s\n",
+				badge,
+				p.Date.Format("2006-01-02"),
+				p.TransactionID,
+				p.TypeDescription,
+				p.AcquisitionType,
+				p.PriceDisplay,
+				extraTag,
+			))
+			b.WriteString(subtleStyle.Render(fmt.Sprintf("        Items in Transaction: %s", strings.Join(p.Items, "; "))) + "\n")
+		}
+	}
+
+	// Matching License Activations
+	b.WriteString(fmt.Sprintf("\n  Matching Account Licenses (%d):\n", len(matchedLicenses)))
+	if len(matchedLicenses) == 0 {
+		b.WriteString(subtleStyle.Render("    (No matching license entry in Steam /account/licenses/)") + "\n")
+	} else {
+		for _, lic := range matchedLicenses {
+			b.WriteString(fmt.Sprintf("    -   %s  |  Method: %-24q -> %-10s  |  Package: %s\n",
+				lic.Date.Format("2006-01-02"),
+				lic.AcquisitionMethod,
+				lic.AcquisitionType,
+				lic.ItemName,
+			))
+		}
+	}
+
+	// 3. Store & Local VDF Metadata
+	b.WriteString("\n  Store & AppInfo Metadata:\n")
+	b.WriteString(fmt.Sprintf("    Developers:  %s\n", defaultIfEmpty(strings.Join(it.Developers, ", "), "-")))
+	b.WriteString(fmt.Sprintf("    Publishers:  %s\n", defaultIfEmpty(strings.Join(it.Publishers, ", "), "-")))
+	b.WriteString(fmt.Sprintf("    Genres:      %s\n", defaultIfEmpty(strings.Join(it.Genres, ", "), "-")))
+	b.WriteString(fmt.Sprintf("    Categories:  %s\n", defaultIfEmpty(strings.Join(it.Categories, ", "), "-")))
+	b.WriteString(fmt.Sprintf("    Store Tags:  %s\n", defaultIfEmpty(strings.Join(it.Tags, ", "), "-")))
+
+	// 4. Collections & Matching Rules
+	var inCols []string
+	if m.opts.ColManager != nil {
+		for _, col := range m.opts.ColManager.ListCollections() {
+			if col.ContainsApp(it.AppID) {
+				inCols = append(inCols, col.Name)
+			}
+		}
+	}
+	var matchingRules []string
+	if m.opts.RulesConfig != nil {
+		single := []models.LibraryItem{it}
+		for _, r := range m.opts.RulesConfig.Rules {
+			if matched, err := rules.FilterItems(single, r.Criteria); err == nil && len(matched) > 0 {
+				matchingRules = append(matchingRules, fmt.Sprintf("%s -> %s", r.Name, r.Collection))
+			}
+		}
+	}
+	b.WriteString(fmt.Sprintf("    Collections: %s\n", defaultIfEmpty(strings.Join(inCols, ", "), "(None)")))
+	b.WriteString(fmt.Sprintf("    Rules Match: %s\n", defaultIfEmpty(strings.Join(matchingRules, ", "), "(None)")))
+
+	return b.String()
+}
+
+func defaultIfEmpty(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
 }
 
 func (m *Model) renderLibraryTab(maxRows int) string {

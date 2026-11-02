@@ -160,5 +160,46 @@ rules:
 		t.Fatalf("login --logout failed: %v", err)
 	}
 	flagLoginLogout = false
+
+	// 8. Test `purchases --raw-transactions` and flag combinations using cached library fallback (after logout)
+	rootCmd.SetArgs([]string{"purchases", "--raw-transactions"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("purchases --raw-transactions failed: %v", err)
+	}
+	flagPurRawTxnsOnly = false
+
+	rootCmd.SetArgs([]string{
+		"purchases",
+		"--min-price", "10",
+		"--max-price", "50",
+		"--free=false",
+		"--refunded=false",
+		"--bundle=false",
+		"--unplayed=true",
+		"--min-hours", "0",
+		"--max-hours", "5",
+		"--add-to", "DryRunCol",
+		"--dry-run",
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("purchases with all flags + dry-run failed: %v", err)
+	}
+	flagPurDryRun = false
+	flagPurAddToCol = ""
+
+	// 9. Test `organize --dry-run`
+	rootCmd.SetArgs([]string{"organize", "--config", rulesPath, "--dry-run"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("organize --dry-run failed: %v", err)
+	}
+	flagOrgDryRun = false
+
+	// 10. Test truncateCLI helper
+	if got := truncateCLI("abcdef", 2); got != "ab" {
+		t.Errorf("expected 'ab', got %q", got)
+	}
+	if got := truncateCLI("abcdefghij", 6); got != "abc..." {
+		t.Errorf("expected 'abc...', got %q", got)
+	}
 }
 

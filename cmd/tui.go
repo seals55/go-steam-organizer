@@ -23,7 +23,22 @@ var tuiCmd = &cobra.Command{
 
 func runInteractiveTUI(ctx context.Context) error {
 	sess, err := auth.LoadSession()
-	if err != nil || !sess.IsValid() {
+	hasCachedLibrary := false
+	if err == nil && sess != nil && sess.SteamID64 != "" {
+		if cached, cErr := steam.LoadLibraryCache(sess.SteamID64); cErr == nil && len(cached.Items) > 0 {
+			hasCachedLibrary = true
+		}
+	} else if cached, cErr := steam.LoadLibraryCache(""); cErr == nil && len(cached.Items) > 0 && cached.SteamID64 != "" {
+		hasCachedLibrary = true
+		acctID, _ := auth.SteamID64ToAccountID(cached.SteamID64)
+		sess = &auth.Session{
+			SteamID64:   cached.SteamID64,
+			AccountID:   acctID,
+			PersonaName: "Cached Session",
+		}
+		err = nil
+	}
+	if (err != nil || !sess.IsValid()) && !hasCachedLibrary {
 		fmt.Println("No active Steam session found. Prompting browser login...")
 		sess, err = auth.EnsureAuthenticated(ctx, auth.LoginOptions{
 			APIKey: flagAPIKey,
@@ -35,12 +50,16 @@ func runInteractiveTUI(ctx context.Context) error {
 
 	var client *steam.Client
 	var items []models.LibraryItem
-	if sess != nil && sess.IsValid() {
+	var purchases []models.PurchaseRecord
+	var licenses []models.LicenseRecord
+	if sess != nil && (sess.IsValid() || hasCachedLibrary) {
 		client = steam.NewClient(sess)
 		if cache, err := client.SyncFullLibrary(ctx, false, 20, func(msg string) {
 			fmt.Println(msg)
 		}); err == nil {
 			items = client.EnrichItems(ctx, cache.Items, false, 0, nil)
+			purchases = cache.Purchases
+			licenses = cache.Licenses
 		}
 	}
 
@@ -64,6 +83,8 @@ func runInteractiveTUI(ctx context.Context) error {
 		Client:        client,
 		ColManager:    colMgr,
 		Items:         items,
+		Purchases:     purchases,
+		Licenses:      licenses,
 		RulesConfig:   rulesCfg,
 		RulesFilePath: rulesPath,
 	})

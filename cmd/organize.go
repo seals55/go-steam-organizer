@@ -37,7 +37,7 @@ var organizeCmd = &cobra.Command{
 			return err
 		}
 
-		sess, err := requireSession(cmd.Context())
+		sess, err := requireSessionOrCached(cmd.Context(), flagOrgRefresh)
 		if err != nil {
 			return err
 		}

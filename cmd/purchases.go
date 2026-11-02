@@ -50,7 +50,7 @@ var purchasesCmd = &cobra.Command{
   # Group all purchases by purchase year using a template collection name
   steam-organizer purchases --type purchase --add-to "Bought in {{.PurchaseYear}}"`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sess, err := requireSession(cmd.Context())
+		sess, err := requireSessionOrCached(cmd.Context(), flagPurRefresh)
 		if err != nil {
 			return err
 		}
