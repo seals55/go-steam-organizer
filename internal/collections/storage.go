@@ -44,6 +44,7 @@ type Manager struct {
 	filePath    string
 	rawEntries  [][2]json.RawMessage
 	collections map[string]*models.Collection // keyed by StorageKey (e.g. "user-collections.uc-xxx")
+	deletedKeys map[string]cloudStorageMeta   // tombstones for deleted collections
 	maxVersion  int64
 }
 
@@ -53,6 +54,7 @@ func LoadManager(filePath string) (*Manager, error) {
 	m := &Manager{
 		filePath:    filePath,
 		collections: make(map[string]*models.Collection),
+		deletedKeys: make(map[string]cloudStorageMeta),
 		maxVersion:  1,
 	}
 
@@ -235,6 +237,30 @@ func (m *Manager) RemoveAppsFromCollection(collectionNameOrID string, appIDs []u
 	return removedCount, nil
 }
 
+// DeleteCollection removes an entire collection by Name, ID, or StorageKey, recording a tombstone
+// ("deleted": true) with an incremented version so Steam Cloud removes the collection cleanly.
+func (m *Manager) DeleteCollection(nameOrID string) (*models.Collection, bool) {
+	col := m.FindByNameOrID(nameOrID)
+	if col == nil {
+		return nil, false
+	}
+	removedCopy := *col
+	delete(m.collections, col.StorageKey)
+	if m.deletedKeys == nil {
+		m.deletedKeys = make(map[string]cloudStorageMeta)
+	}
+	m.maxVersion++
+	m.deletedKeys[col.StorageKey] = cloudStorageMeta{
+		Key:                      col.StorageKey,
+		Timestamp:                time.Now().Unix(),
+		Version:                  strconv.FormatInt(m.maxVersion, 10),
+		Deleted:                  true,
+		ConflictResolutionMethod: "custom",
+		StrMethodID:              "union-collections",
+	}
+	return &removedCopy, true
+}
+
 // Save writes the updated collections back to cloud-storage-namespace-1.json (creating a backup first).
 func (m *Manager) Save() (backupPath string, err error) {
 	if m.filePath == "" {
@@ -275,6 +301,15 @@ func (m *Manager) MarshalCloudStorageJSON() ([]byte, error) {
 
 		col, isManaged := m.collections[key]
 		if !isManaged {
+			if delMeta, isDeleted := m.deletedKeys[key]; isDeleted {
+				handledKeys[key] = true
+				metaBytes, err := json.Marshal(delMeta)
+				if err != nil {
+					return nil, err
+				}
+				outEntries = append(outEntries, [2]json.RawMessage{tuple[0], metaBytes})
+				continue
+			}
 			outEntries = append(outEntries, tuple)
 			continue
 		}

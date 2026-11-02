@@ -187,12 +187,50 @@ rules:
 	flagPurDryRun = false
 	flagPurAddToCol = ""
 
-	// 9. Test `organize --dry-run`
+	// 9. Test `organize --dry-run` and `organize --remove`
 	rootCmd.SetArgs([]string{"organize", "--config", rulesPath, "--dry-run"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("organize --dry-run failed: %v", err)
 	}
 	flagOrgDryRun = false
+
+	// Remove all groups specified in the rules file (first dry-run, then live)
+	rootCmd.SetArgs([]string{"organize", "--config", rulesPath, "--remove", "--dry-run"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("organize --remove --dry-run failed: %v", err)
+	}
+	flagOrgDryRun = false
+	flagOrgRemove = false
+
+	rootCmd.SetArgs([]string{"organize", "--config", rulesPath, "--remove"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("organize --remove failed: %v", err)
+	}
+	flagOrgRemove = false
+
+	// Also test `collections delete --collection` and `collections remove --from-rules`
+	rootCmd.SetArgs([]string{"collections", "add", "--collection", "TempGroup", "--app", "620"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("collections add TempGroup failed: %v", err)
+	}
+	flagColName = ""
+	flagColApps = nil
+	rootCmd.SetArgs([]string{"collections", "delete", "--collection", "TempGroup"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("collections delete TempGroup failed: %v", err)
+	}
+	flagColName = ""
+
+	// Re-apply organize and then remove via `collections remove --from-rules`
+	rootCmd.SetArgs([]string{"organize", "--config", rulesPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("organize re-apply failed: %v", err)
+	}
+	rootCmd.SetArgs([]string{"collections", "remove", "--from-rules", "--config", rulesPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("collections remove --from-rules failed: %v", err)
+	}
+	flagColFromRules = false
 
 	// 10. Test truncateCLI helper
 	if got := truncateCLI("abcdef", 2); got != "ab" {

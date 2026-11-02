@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,5 +172,46 @@ func TestSyncWithCloud(t *testing.T) {
 
 	if err := mgr.SyncWithCloud(t.Context(), nil); err == nil {
 		t.Errorf("expected error when client is nil")
+	}
+
+	// Test DeleteCollection and tombstone serialization
+	mgr.EnsureCollection("Purchased")
+	mgr.EnsureCollection("Bought in 2025")
+	if _, err := mgr.Save(); err != nil {
+		t.Fatalf("Save before delete failed: %v", err)
+	}
+
+	// Reload so "Purchased" and "Bought in 2025" exist in rawEntries
+	mgrReloaded, err := LoadManager(tmpFile)
+	if err != nil {
+		t.Fatalf("Reload before delete failed: %v", err)
+	}
+	deletedCol, ok := mgrReloaded.DeleteCollection("Purchased")
+	if !ok || deletedCol == nil || deletedCol.Name != "Purchased" {
+		t.Fatalf("expected DeleteCollection('Purchased') to succeed, got ok=%v col=%v", ok, deletedCol)
+	}
+	if _, ok := mgrReloaded.DeleteCollection("NonExistentGroup"); ok {
+		t.Errorf("expected DeleteCollection('NonExistentGroup') to return false")
+	}
+	if _, err := mgrReloaded.Save(); err != nil {
+		t.Fatalf("Save after delete failed: %v", err)
+	}
+
+	// Verify raw JSON contains `"deleted":true` tombstone for Purchased and reloaded manager no longer lists it
+	rawBytes, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawBytes), `"deleted":true`) {
+		t.Errorf("expected saved JSON to contain tombstone '\"deleted\":true', got:\n%s", string(rawBytes))
+	}
+	mgrAfterDelete, err := LoadManager(tmpFile)
+	if err != nil {
+		t.Fatalf("Load after delete failed: %v", err)
+	}
+	for _, c := range mgrAfterDelete.ListCollections() {
+		if c.Name == "Purchased" {
+			t.Errorf("expected 'Purchased' to be absent after deletion, still found: %+v", c)
+		}
 	}
 }

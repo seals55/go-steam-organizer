@@ -188,6 +188,50 @@ func renderCollectionName(tmplStr string, item models.LibraryItem) (string, erro
 	return strings.TrimSpace(buf.String()), nil
 }
 
+var templatePlaceholderRegex = regexp.MustCompile(`\{\{.*?\}\}`)
+
+// RuleMatchesCollectionName checks whether an existing collection name matches a rule's collection specification
+// (supporting both exact case-insensitive names like "Purchased" and template patterns like "Bought in {{.PurchaseYear}}").
+func RuleMatchesCollectionName(ruleCollectionSpec, colName string) bool {
+	spec := strings.TrimSpace(ruleCollectionSpec)
+	target := strings.TrimSpace(colName)
+	if spec == "" || target == "" {
+		return false
+	}
+	if !strings.Contains(spec, "{{") {
+		return strings.EqualFold(spec, target)
+	}
+
+	parts := templatePlaceholderRegex.Split(spec, -1)
+	escaped := make([]string, len(parts))
+	for i, p := range parts {
+		escaped[i] = regexp.QuoteMeta(p)
+	}
+	pattern := "(?i)^" + strings.Join(escaped, ".+") + "$"
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(target)
+}
+
+// MatchingCollectionsForRules returns all existing collections whose names match any rule in cfg.
+func MatchingCollectionsForRules(cfg *ConfigFile, existing []models.Collection) []models.Collection {
+	if cfg == nil || len(cfg.Rules) == 0 || len(existing) == 0 {
+		return nil
+	}
+	var matched []models.Collection
+	for _, col := range existing {
+		for _, rule := range cfg.Rules {
+			if RuleMatchesCollectionName(rule.Collection, col.Name) {
+				matched = append(matched, col)
+				break
+			}
+		}
+	}
+	return matched
+}
+
 func matchesCriteria(item models.LibraryItem, c Criteria, afterTime, beforeTime time.Time, nameRe *regexp.Regexp) bool {
 	// 1. Explicit AppIDs
 	if len(c.AppIDs) > 0 {

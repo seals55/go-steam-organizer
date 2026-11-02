@@ -379,6 +379,19 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		}
 
+	case "x":
+		if m.tab == tabRules {
+			return m.removeRuleCollectionsInTUI()
+		}
+		if m.tab == tabCollections {
+			return m.deleteSelectedCollectionInTUI()
+		}
+
+	case "X":
+		if m.tab == tabRules || m.tab == tabCollections {
+			return m.removeRuleCollectionsInTUI()
+		}
+
 	case "s":
 		if m.opts.ColManager == nil {
 			m.status = "No collection storage configured."
@@ -558,6 +571,67 @@ func (m *Model) applyRulesInTUI() (tea.Model, tea.Cmd) {
 	m.dirtyCols = true
 	m.status = fmt.Sprintf("Applied %d rules across %d target collections (%d new assignments). Press 's' to save.", len(results), colsTouched, totalAdded)
 	m.statusErr = false
+	return m, nil
+}
+
+func (m *Model) removeRuleCollectionsInTUI() (tea.Model, tea.Cmd) {
+	if m.opts.RulesConfig == nil || len(m.opts.RulesConfig.Rules) == 0 {
+		m.status = "No rules loaded. Pass --config rules.yaml to remove rule collections."
+		m.statusErr = true
+		return m, nil
+	}
+	if m.opts.ColManager == nil {
+		m.status = "No collection manager loaded."
+		m.statusErr = true
+		return m, nil
+	}
+	existing := m.opts.ColManager.ListCollections()
+	matched := rules.MatchingCollectionsForRules(m.opts.RulesConfig, existing)
+	if len(matched) == 0 {
+		m.status = "No existing collections match the groups specified in the rules file."
+		m.statusErr = false
+		return m, nil
+	}
+	deletedCount := 0
+	for _, col := range matched {
+		if _, ok := m.opts.ColManager.DeleteCollection(col.ID); ok {
+			deletedCount++
+		}
+	}
+	if m.colCursor >= m.collectionCount() && m.collectionCount() > 0 {
+		m.colCursor = m.collectionCount() - 1
+	} else if m.collectionCount() == 0 {
+		m.colCursor = 0
+	}
+	m.dirtyCols = true
+	m.status = fmt.Sprintf("Removed %d collection(s) matching rules file. Press 's' to save.", deletedCount)
+	m.statusErr = false
+	return m, nil
+}
+
+func (m *Model) deleteSelectedCollectionInTUI() (tea.Model, tea.Cmd) {
+	if m.opts.ColManager == nil {
+		m.status = "No collection manager loaded."
+		m.statusErr = true
+		return m, nil
+	}
+	cols := m.opts.ColManager.ListCollections()
+	if len(cols) == 0 || m.colCursor >= len(cols) {
+		m.status = "No collection selected to delete."
+		m.statusErr = true
+		return m, nil
+	}
+	target := cols[m.colCursor]
+	if _, ok := m.opts.ColManager.DeleteCollection(target.ID); ok {
+		if m.colCursor >= m.collectionCount() && m.collectionCount() > 0 {
+			m.colCursor = m.collectionCount() - 1
+		} else if m.collectionCount() == 0 {
+			m.colCursor = 0
+		}
+		m.dirtyCols = true
+		m.status = fmt.Sprintf("Deleted collection '%s'. Press 's' to save.", target.Name)
+		m.statusErr = false
+	}
 	return m, nil
 }
 
@@ -760,7 +834,7 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString("  " + statusStyle.Render(m.status) + "\n")
 	}
-	help := "  Keys: [Tab] Switch View  [/] Filter  [Enter/i] Details  [Space] Select  [Ctrl+A] All  [a] Add to Col  [s] Save  [r] Sync  [m] Metadata  [l] Login  [q] Quit"
+	help := "  Keys: [Tab] Switch View  [/] Filter  [Enter/i] Details  [Space] Select  [Ctrl+A] All  [a] Apply/Add  [x] Remove Cols  [s] Save  [r] Sync  [m] Metadata  [l] Login  [q] Quit"
 	b.WriteString(subtleStyle.Render(help))
 
 	return b.String()
@@ -956,7 +1030,7 @@ func (m *Model) renderCollectionsTab(maxRows int) string {
 	}
 	cols := m.opts.ColManager.ListCollections()
 	var b strings.Builder
-	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Storage File: %s", m.opts.ColManager.FilePath())) + "\n\n")
+	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Storage File: %s  (Press 'n' new, 'x' delete selected, 'X' delete all rule groups)", m.opts.ColManager.FilePath())) + "\n\n")
 	if len(cols) == 0 {
 		b.WriteString("  No collections found. Press 'n' to create a new collection.\n")
 		return b.String()
@@ -998,7 +1072,7 @@ func (m *Model) renderRulesTab(maxRows int) string {
 		return "  No rules configuration loaded. Run with '--config rules.yaml' to preview and apply rules here.\n"
 	}
 	var b strings.Builder
-	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Rules File: %s  (Press 'a' to evaluate & apply all rules)", m.opts.RulesFilePath)) + "\n\n")
+	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Rules File: %s  (Press 'a' to apply all rules, 'x' to remove all rule groups)", m.opts.RulesFilePath)) + "\n\n")
 
 	results, _ := rules.EvaluateRules(m.opts.Items, m.opts.RulesConfig)
 	hdr := fmt.Sprintf("  %-28s %-32s %-10s", "Rule Name", "Target Collection", "Matches")

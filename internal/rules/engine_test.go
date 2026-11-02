@@ -198,3 +198,40 @@ rules:
 		t.Errorf("expected EvaluateRules to return error on invalid NameRegex")
 	}
 }
+
+func TestMatchingCollectionsForRules(t *testing.T) {
+	cfg := &ConfigFile{
+		Rules: []Rule{
+			{Name: "Purchased", Collection: "Purchased"},
+			{Name: "Gift", Collection: "Gift"},
+			{Name: "Yearly", Collection: "Bought in {{.PurchaseYear}}"},
+		},
+	}
+
+	existing := []models.Collection{
+		{ID: "uc-1", Name: "Purchased"},
+		{ID: "uc-2", Name: "Bought in 2016"},
+		{ID: "uc-3", Name: "Bought in 2025"},
+		{ID: "uc-4", Name: "My Custom Favorites"},
+		{ID: "uc-5", Name: "gift"},
+	}
+
+	matched := MatchingCollectionsForRules(cfg, existing)
+	if len(matched) != 4 {
+		t.Fatalf("expected 4 matched collections (Purchased, Bought in 2016, Bought in 2025, gift), got %d: %+v", len(matched), matched)
+	}
+
+	// Verify "My Custom Favorites" is NOT matched
+	for _, m := range matched {
+		if m.Name == "My Custom Favorites" {
+			t.Errorf("did not expect 'My Custom Favorites' to match rules")
+		}
+	}
+
+	if RuleMatchesCollectionName("", "Purchased") {
+		t.Errorf("expected empty rule collection spec to return false")
+	}
+	if len(MatchingCollectionsForRules(nil, existing)) != 0 {
+		t.Errorf("expected nil config to return nil/empty slice")
+	}
+}

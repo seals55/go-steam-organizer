@@ -342,15 +342,31 @@ func TestTUINavigationMessagesAndEdgeCases(t *testing.T) {
 	sendKeyStr(m, "n")
 	m.textInput.SetValue("")
 	sendKeyStr(m, "enter")
+	// Delete selected collection in Collections tab with 'x'
+	sendKeyStr(m, "x")
+	if !m.dirtyCols {
+		t.Errorf("expected dirtyCols=true after deleting collection in TUI")
+	}
 
-	// Navigate to Rules tab and move cursor, then shift+tab back
+	// Navigate to Rules tab and move cursor, then test 'a' (apply rules) and 'x' (remove all rule collections)
 	sendKeyStr(m, "tab")
 	sendKeyStr(m, "j")
 	sendKeyStr(m, "k")
+	sendKeyStr(m, "a")
+	sendKeyStr(m, "x")
+	if !strings.Contains(m.status, "Removed") {
+		t.Errorf("expected status to mention Removed after pressing 'x' in Rules tab, got %q", m.status)
+	}
+	// Pressing 'x' a second time when already removed should report no existing collections match
+	sendKeyStr(m, "x")
+	if !strings.Contains(m.status, "No existing collections match") {
+		t.Errorf("expected 'No existing collections match' status, got %q", m.status)
+	}
 	sendKeyStr(m, "shift+tab")
 	if m.tab != tabCollections {
 		t.Errorf("expected tabCollections after shift+tab, got %v", m.tab)
 	}
+	sendKeyStr(m, "X")
 	sendKeyStr(m, "shift+tab")
 
 	// Test async Tea messages (statusMsg, syncCompleteMsg, loginCompleteMsg)
