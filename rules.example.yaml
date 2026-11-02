@@ -1,0 +1,82 @@
+# Example organization rules for go-steam-organizer
+# Run with:
+#   steam-organizer organize --config rules.example.yaml --dry-run
+#   steam-organizer organize --config rules.example.yaml --enrich-metadata
+
+rules:
+  # 1. Purchase Date / Year (supports dynamic {{.PurchaseYear}} template!)
+  - name: "Group by Purchase Year"
+    description: "Automatically organizes games into 'Bought in YYYY' collections"
+    collection: "Bought in {{.PurchaseYear}}"
+    criteria:
+      acquisition_types:
+        - purchase
+        - bundle
+        - retail_key
+        - gift
+
+  - name: "2025 Holiday Sale Pickups"
+    description: "Games purchased during late 2025"
+    collection: "2025 Holiday Pickups"
+    criteria:
+      purchased_after: "2025-11-20"
+      purchased_before: "2026-01-05"
+
+  # 2. Price & Acquisition Type
+  - name: "Bargain Bin (< $5)"
+    description: "Paid store purchases under $5.00"
+    collection: "Bargain Bin (< $5)"
+    criteria:
+      acquisition_types:
+        - purchase
+      min_price: 0.01
+      max_price: 5.00
+
+  - name: "Bundle & Retail Key Games"
+    description: "Games activated via Humble/Fanatical bundles or retail keys"
+    collection: "Bundles & Keys"
+    criteria:
+      acquisition_types:
+        - bundle
+        - retail_key
+
+  - name: "Free & Complimentary"
+    description: "Free-to-play or complimentary license activations"
+    collection: "Freebies"
+    criteria:
+      is_free: true
+
+  # 3. Store Metadata (Genres, Tags, Categories, Developers, Steam Deck)
+  - name: "Steam Deck Verified"
+    description: "Games officially verified for Steam Deck"
+    collection: "Deck Verified"
+    criteria:
+      deck_compatibility:
+        - verified
+
+  - name: "Co-op & Multiplayer Night"
+    description: "Games with Co-op or Multi-player support"
+    collection: "Co-op Night"
+    criteria:
+      categories:
+        - "Co-op"
+        - "Multi-player"
+
+  # 4. Playtime & Combined Criteria
+  - name: "Unplayed RPG Backlog"
+    description: "RPGs with 0 minutes of playtime"
+    collection: "Backlog: RPGs"
+    criteria:
+      unplayed: true
+      genres:
+        - "RPG"
+
+  - name: "Refund Eligible (< 2 Hours Played)"
+    description: "Store purchases played for less than 2 hours"
+    collection: "Under 2 Hours"
+    criteria:
+      acquisition_types:
+        - purchase
+      max_playtime_hours: 2.0
+      is_refunded: false
+
