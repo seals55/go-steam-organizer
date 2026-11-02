@@ -93,7 +93,10 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 		}
 	}
 
-	// 4. Bulk-resolve names, is_free status, developers, and publishers via IStoreBrowseService/GetItems/v1
+	// 4. Enrich from local Steam appcache (packageinfo.vdf & appinfo.vdf) in <0.5s with zero network rate limits
+	EnrichFromLocalSteamCache(itemsByApp, "")
+
+	// 5. Fallback bulk-resolve any remaining unnamed items ("App <id>") via IStoreBrowseService/GetItems/v1
 	c.bulkEnrichStoreItems(ctx, itemsByApp)
 
 	result := make([]models.LibraryItem, 0, len(itemsByApp))
@@ -106,20 +109,25 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 	return result, nil
 }
 
-// bulkEnrichStoreItems queries IStoreBrowseService/GetItems/v1 in batches of 200 AppIDs
-// to populate missing titles ("App <id>"), is_free flags, developers, and publishers.
+// bulkEnrichStoreItems queries IStoreBrowseService/GetItems/v1 in batches of 100 AppIDs
+// for any owned apps still missing titles ("App <id>"), with polite concurrency and retry on HTTP 429.
 func (c *Client) bulkEnrichStoreItems(ctx context.Context, itemsByApp map[uint32]models.LibraryItem) {
 	if len(itemsByApp) == 0 {
 		return
 	}
 
-	appIDs := make([]uint32, 0, len(itemsByApp))
-	for id := range itemsByApp {
-		appIDs = append(appIDs, id)
+	var appIDs []uint32
+	for id, it := range itemsByApp {
+		if it.Name == "" || strings.HasPrefix(it.Name, "App ") {
+			appIDs = append(appIDs, id)
+		}
+	}
+	if len(appIDs) == 0 {
+		return
 	}
 	sort.Slice(appIDs, func(i, j int) bool { return appIDs[i] < appIDs[j] })
 
-	const batchSize = 200
+	const batchSize = 100
 	var batches [][]uint32
 	for i := 0; i < len(appIDs); i += batchSize {
 		end := i + batchSize
@@ -144,7 +152,7 @@ func (c *Client) bulkEnrichStoreItems(ctx context.Context, itemsByApp map[uint32
 	}
 
 	var mu sync.Mutex
-	sem := make(chan struct{}, 6)
+	sem := make(chan struct{}, 2)
 	var wg sync.WaitGroup
 
 	for _, batch := range batches {
@@ -186,7 +194,21 @@ func (c *Client) bulkEnrichStoreItems(ctx context.Context, itemsByApp map[uint32
 			params.Set("input_json", string(jb))
 			params.Set("format", "json")
 
-			body, err := c.GetWebAPI(ctx, "IStoreBrowseService/GetItems/v1/", params)
+			var body []byte
+			for attempt := 0; attempt < 3; attempt++ {
+				body, err = c.GetWebAPI(ctx, "IStoreBrowseService/GetItems/v1/", params)
+				if err == nil {
+					break
+				}
+				if !strings.Contains(err.Error(), "429") {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(400*(attempt+1)) * time.Millisecond):
+				}
+			}
 			if err != nil {
 				return
 			}

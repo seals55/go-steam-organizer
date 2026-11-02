@@ -31,6 +31,7 @@ func TestClientFullSyncAndMetadataEnrichment(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("USERPROFILE", tmpHome)
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("STEAM_PATH", tmpHome)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
