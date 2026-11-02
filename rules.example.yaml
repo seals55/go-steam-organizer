@@ -80,3 +80,32 @@ rules:
       max_playtime_hours: 2.0
       is_refunded: false
 
+  - name: "Purchased"
+    description: "Automatically organizes games into 'Purchased' collection"
+    collection: "Purchased"
+    criteria:
+      acquisition_types:
+        - purchase
+
+  - name: "Bundle"
+    description: "Automatically organizes games into 'Bundle' collection"
+    collection: "Bundle"
+    criteria:
+      acquisition_types:
+        - bundle
+
+  - name: "Retail Key"
+    description: "Automatically organizes games into 'Retail Key' collection"
+    collection: "Retail Key"
+    criteria:
+      acquisition_types:
+        - retail_key
+
+  - name: "Gift"
+    description: "Automatically organizes games into 'Gift' collection"
+    collection: "Gift"
+    criteria:
+      acquisition_types:
+        - gift
+
+
