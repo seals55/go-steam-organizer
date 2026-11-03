@@ -24,6 +24,7 @@ const sampleHistoryHTML = `
     <tr class="wallet_table_row" onclick="window.location='https://help.steampowered.com/en/wizard/HelpWithTransaction?transid=444555666'">
       <td class="wht_date">Dec 20, 2024</td>
       <td class="wht_items">
+        <div>Valve Complete Pack</div>
         <div>Portal</div>
         <div>Portal 2</div>
       </td>
@@ -367,6 +368,84 @@ func TestExplainItemAcquisitionAndHelpers(t *testing.T) {
 	}
 	if parsePriceCents("Free") != 0 || parsePriceCents("--") != 0 || parsePriceCents("no digits") != 0 {
 		t.Errorf("expected 0 cents for non-paid strings")
+	}
+}
+
+func TestAmpersandTitleNormalizationAndMultiItemCartMigration(t *testing.T) {
+	if got, want := NormalizeTitle("Sorcery! Parts 1 & 2"), NormalizeTitle("Sorcery! Parts 1 and 2"); got != want {
+		t.Fatalf("expected NormalizeTitle('&') == NormalizeTitle('and'), got %q vs %q", got, want)
+	}
+
+	cartHTML := `
+	<table class="wallet_history_table">
+	  <tr class="wallet_table_row" onclick="window.location='https://help.steampowered.com/en/wizard/HelpWithTransaction?transid=389157488265053604'">
+	    <td class="wht_date">Nov 2, 2026</td>
+	    <td class="wht_items">
+	      <div>Sorcery! Parts 1 and 2</div>
+	      <div>Sorcery! Part 3</div>
+	      <div>Sorcery! Part 4</div>
+	      <div>Brotato: Primal Dread</div>
+	    </td>
+	    <td class="wht_type"><div>Purchase</div><div class="wht_type_sub">Visa **69</div></td>
+	    <td class="wht_total">$26.31</td>
+	  </tr>
+	</table>`
+
+	purchases := ParsePurchaseHistoryHTML(cartHTML)
+	if len(purchases) != 1 {
+		t.Fatalf("expected 1 purchase row, got %d", len(purchases))
+	}
+	if purchases[0].IsBundle || purchases[0].AcquisitionType != models.AcquisitionPurchase {
+		t.Errorf("expected multi-item cart without bundle keywords to be classified as purchase, got %+v", purchases[0])
+	}
+
+	// Simulate an older cache where the multi-item cart was marked as a bundle and "Sorcery! Parts 1 & 2" failed to match
+	staleCache := &LibraryCache{
+		Items: []models.LibraryItem{
+			{
+				AppID:             411000,
+				Name:              "Sorcery! Parts 1 & 2",
+				AcquisitionType:   models.AcquisitionPurchase,
+				AcquisitionReason: "Local Steam packageinfo.vdf (BillingType=1 Paid Steam Store Package)",
+			},
+			{
+				AppID:              445040,
+				Name:               "Sorcery! Part 3",
+				PurchaseDate:       time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC),
+				AcquisitionType:    models.AcquisitionBundle,
+				PriceCents:         2631,
+				PriceDisplay:       "$26.31",
+				IsBundle:           true,
+				MatchedTransaction: "389157488265053604",
+			},
+		},
+		Purchases: []models.PurchaseRecord{
+			{
+				TransactionID:   "389157488265053604",
+				Date:            time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC),
+				Items:           []string{"Sorcery! Parts 1 and 2", "Sorcery! Part 3", "Sorcery! Part 4", "Brotato: Primal Dread"},
+				TypeDescription: "Purchase Visa **69",
+				AcquisitionType: models.AcquisitionBundle,
+				PriceCents:      2631,
+				PriceDisplay:    "$26.31",
+				IsBundle:        true,
+			},
+		},
+	}
+
+	if !migrateCachedOutgoingGifts(staleCache) {
+		t.Fatalf("expected migrateCachedOutgoingGifts to detect and migrate multi-item cart and '&' title match")
+	}
+	for _, it := range staleCache.Items {
+		if it.PurchaseYear() != 2026 {
+			t.Errorf("expected %q to have PurchaseYear 2026, got %d (PurchaseDate=%v)", it.Name, it.PurchaseYear(), it.PurchaseDate)
+		}
+		if it.AcquisitionType != models.AcquisitionPurchase || it.IsBundle {
+			t.Errorf("expected %q to have AcquisitionType=purchase and IsBundle=false, got type=%q isBundle=%v", it.Name, it.AcquisitionType, it.IsBundle)
+		}
+		if it.MatchedTransaction != "389157488265053604" || it.PriceCents != 2631 {
+			t.Errorf("expected %q to match transaction 389157488265053604 ($26.31), got tx=%q cents=%d", it.Name, it.MatchedTransaction, it.PriceCents)
+		}
 	}
 }
 

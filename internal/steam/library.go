@@ -344,7 +344,9 @@ func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHist
 }
 
 // migrateCachedOutgoingGifts upgrades a previously saved LibraryCache if any "Gift Purchase ..." rows
-// in Purchases were classified as "gift" instead of "gift_sent", re-merging affected library items.
+// in Purchases were classified as "gift" instead of "gift_sent", if multi-item cart checkouts without
+// bundle keywords were marked as bundles, or if updated title normalization (such as "&" <-> "and")
+// matches previously unmatched library items.
 func migrateCachedOutgoingGifts(cache *LibraryCache) bool {
 	if cache == nil {
 		return false
@@ -363,6 +365,12 @@ func migrateCachedOutgoingGifts(cache *LibraryCache) bool {
 				}
 				changed = true
 			}
+			continue
+		}
+		if cache.Purchases[i].IsBundle && !containsBundleKeyword(cache.Purchases[i].Items) {
+			cache.Purchases[i].IsBundle = false
+			cache.Purchases[i].AcquisitionType = classifyPurchaseAcquisition(cache.Purchases[i])
+			changed = true
 		}
 	}
 	for _, it := range cache.Items {
@@ -371,8 +379,21 @@ func migrateCachedOutgoingGifts(cache *LibraryCache) bool {
 			break
 		}
 	}
+	remerged := MergeLibraryWithPurchases(cache.Items, cache.Purchases, cache.Licenses)
+	if !changed && len(remerged) == len(cache.Items) {
+		for i := range remerged {
+			if remerged[i].MatchedTransaction != cache.Items[i].MatchedTransaction ||
+				!remerged[i].PurchaseDate.Equal(cache.Items[i].PurchaseDate) ||
+				remerged[i].AcquisitionType != cache.Items[i].AcquisitionType ||
+				remerged[i].IsBundle != cache.Items[i].IsBundle ||
+				remerged[i].PriceCents != cache.Items[i].PriceCents {
+				changed = true
+				break
+			}
+		}
+	}
 	if changed {
-		cache.Items = MergeLibraryWithPurchases(cache.Items, cache.Purchases, cache.Licenses)
+		cache.Items = remerged
 	}
 	return changed
 }
@@ -471,7 +492,7 @@ func MergeLibraryWithPurchases(
 			if item.PurchaseDate.IsZero() && !lic.Date.IsZero() {
 				item.PurchaseDate = lic.Date
 			}
-			if item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown {
+			if item.AcquisitionType == "" || item.AcquisitionType == models.AcquisitionUnknown || strings.HasPrefix(item.AcquisitionReason, "Local Steam ") {
 				item.AcquisitionType = lic.AcquisitionType
 				if lic.AcquisitionType == models.AcquisitionFree {
 					item.IsFree = true

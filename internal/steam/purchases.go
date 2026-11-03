@@ -137,13 +137,18 @@ func ParsePurchaseHistoryHTML(rawHTML string) []models.PurchaseRecord {
 			rec.Date = parseSteamDate(dateStr)
 		}
 
+		hasSteamBundleDiv := false
 		if im := whtItemsRegex.FindStringSubmatch(rowInner); len(im) > 1 {
 			itemsCell := im[1]
 			divs := itemDivRegex.FindAllStringSubmatch(itemsCell, -1)
 			if len(divs) > 0 {
 				for _, d := range divs {
 					txt := cleanHTMLText(d[1])
-					if txt != "" && !strings.HasPrefix(strings.ToLower(txt), "steambundle") {
+					if strings.HasPrefix(strings.ToLower(txt), "steambundle") {
+						hasSteamBundleDiv = true
+						continue
+					}
+					if txt != "" {
 						rec.Items = append(rec.Items, txt)
 					}
 				}
@@ -181,7 +186,7 @@ func ParsePurchaseHistoryHTML(rawHTML string) []models.PurchaseRecord {
 			}
 		}
 
-		rec.IsBundle = len(rec.Items) > 1 || containsBundleKeyword(rec.Items)
+		rec.IsBundle = hasSteamBundleDiv || containsBundleKeyword(rec.Items)
 		rec.IsFree = rec.PriceCents == 0 && !rec.IsRefunded
 		rec.IsGiftForOther = strings.Contains(strings.ToLower(rec.TypeDescription), "gift")
 		rec.AcquisitionType = classifyPurchaseAcquisition(rec)
@@ -365,6 +370,7 @@ func NormalizeTitle(title string) string {
 	} {
 		s = strings.ReplaceAll(s, suffix, "")
 	}
+	s = strings.ReplaceAll(s, "&", " and ")
 	s = strings.ReplaceAll(s, "™", "")
 	s = strings.ReplaceAll(s, "®", "")
 	s = strings.ReplaceAll(s, "©", "")
