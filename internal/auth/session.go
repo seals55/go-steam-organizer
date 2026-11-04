@@ -99,9 +99,14 @@ func ClearSession() error {
 	return nil
 }
 
-// IsValid checks whether the session has required credentials and is not expired.
+// IsValid checks whether the session has required credentials, is valid for store.steampowered.com, and is not expired.
 func (s *Session) IsValid() bool {
 	if s == nil || s.SteamLoginSecure == "" || s.SteamID64 == "" {
+		return false
+	}
+	if _, _, exp, err := ParseSteamLoginSecure(s.SteamLoginSecure); err != nil {
+		return false
+	} else if !exp.IsZero() && time.Now().After(exp.Add(-2*time.Minute)) {
 		return false
 	}
 	if !s.ExpiresAt.IsZero() && time.Now().After(s.ExpiresAt.Add(-2*time.Minute)) {
@@ -144,17 +149,23 @@ func ParseSteamLoginSecure(rawCookie string) (steamID64 string, jwtToken string,
 		return "", "", time.Time{}, fmt.Errorf("invalid SteamID64 in cookie: %w", err)
 	}
 
-	// Parse JWT payload for expiration time (`exp`)
+	// Parse JWT payload for expiration time (`exp`) and audience (`aud`)
 	jwtSegments := strings.Split(jwtToken, ".")
 	if len(jwtSegments) >= 2 {
 		payloadBytes, decErr := base64.RawURLEncoding.DecodeString(jwtSegments[1])
 		if decErr == nil {
 			var claims struct {
-				Exp int64  `json:"exp"`
-				Sub string `json:"sub"`
+				Exp int64    `json:"exp"`
+				Sub string   `json:"sub"`
+				Aud []string `json:"aud"`
 			}
-			if json.Unmarshal(payloadBytes, &claims) == nil && claims.Exp > 0 {
-				expiresAt = time.Unix(claims.Exp, 0)
+			if json.Unmarshal(payloadBytes, &claims) == nil {
+				if len(claims.Aud) > 0 && !hasValidStoreAudience(claims.Aud) {
+					return "", "", time.Time{}, fmt.Errorf("steamLoginSecure cookie has non-store audience %v (expected store.steampowered.com cookie)", claims.Aud)
+				}
+				if claims.Exp > 0 {
+					expiresAt = time.Unix(claims.Exp, 0)
+				}
 			}
 		}
 	}
@@ -162,5 +173,15 @@ func ParseSteamLoginSecure(rawCookie string) (steamID64 string, jwtToken string,
 		expiresAt = time.Now().Add(24 * time.Hour)
 	}
 	return steamID64, jwtToken, expiresAt, nil
+}
+
+func hasValidStoreAudience(aud []string) bool {
+	for _, a := range aud {
+		lower := strings.ToLower(strings.TrimSpace(a))
+		if lower == "web:store" || lower == "store" || lower == "web" || lower == "*" || lower == "" {
+			return true
+		}
+	}
+	return false
 }
 

@@ -74,20 +74,13 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 	}
 
 	// 3. Supplement with dynamicstore/userdata owned apps (with cache-busting timestamp)
-	dsPath := fmt.Sprintf("/dynamicstore/userdata/?v=%d", time.Now().Unix())
-	if body, err := c.GetStore(ctx, dsPath); err == nil {
-		var ds struct {
-			RgOwnedApps     []uint32 `json:"rgOwnedApps"`
-			RgOwnedPackages []uint32 `json:"rgOwnedPackages"`
-		}
-		if json.Unmarshal(body, &ds) == nil {
-			for _, appID := range ds.RgOwnedApps {
-				if _, exists := itemsByApp[appID]; !exists {
-					itemsByApp[appID] = models.LibraryItem{
-						AppID:           appID,
-						Name:            fmt.Sprintf("App %d", appID),
-						AcquisitionType: models.AcquisitionUnknown,
-					}
+	if dsApps, err := c.fetchDynamicStoreOwnedApps(ctx); err == nil {
+		for _, appID := range dsApps {
+			if _, exists := itemsByApp[appID]; !exists {
+				itemsByApp[appID] = models.LibraryItem{
+					AppID:           appID,
+					Name:            fmt.Sprintf("App %d", appID),
+					AcquisitionType: models.AcquisitionUnknown,
 				}
 			}
 		}
@@ -107,6 +100,22 @@ func (c *Client) FetchOwnedGames(ctx context.Context) ([]models.LibraryItem, err
 		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
 	})
 	return result, nil
+}
+
+func (c *Client) fetchDynamicStoreOwnedApps(ctx context.Context) ([]uint32, error) {
+	dsPath := fmt.Sprintf("/dynamicstore/userdata/?v=%d", time.Now().Unix())
+	body, err := c.GetStore(ctx, dsPath)
+	if err != nil {
+		return nil, err
+	}
+	var ds struct {
+		RgOwnedApps     []uint32 `json:"rgOwnedApps"`
+		RgOwnedPackages []uint32 `json:"rgOwnedPackages"`
+	}
+	if err := json.Unmarshal(body, &ds); err != nil {
+		return nil, err
+	}
+	return ds.RgOwnedApps, nil
 }
 
 // bulkEnrichStoreItems queries IStoreBrowseService/GetItems/v1 in batches of 100 AppIDs
@@ -293,12 +302,23 @@ func parseCommunityGamesHTML(pageHTML string) []models.LibraryItem {
 
 // SyncFullLibrary fetches owned games, purchase history, and licenses, then merges them into a unified slice of LibraryItems.
 func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHistoryPages int, logf func(string)) (*LibraryCache, error) {
-	if !forceRefresh && c.session != nil {
-		if cached, err := LoadLibraryCache(c.session.SteamID64); err == nil && len(cached.Items) > 0 {
-			if migrateCachedOutgoingGifts(cached) {
-				_ = SaveLibraryCache(cached)
+	steamID := ""
+	if c.session != nil {
+		steamID = c.session.SteamID64
+	}
+	prevCache, _ := LoadLibraryCache(steamID)
+
+	if !forceRefresh && prevCache != nil && len(prevCache.Items) > 0 {
+		hasHistoryOrLicenses := len(prevCache.Purchases) > 0 || len(prevCache.Licenses) > 0
+		if hasHistoryOrLicenses || c.session == nil || !c.session.IsValid() {
+			changed := migrateCachedOutgoingGifts(prevCache)
+			if c.session != nil && c.session.IsValid() && c.syncNewlyAddedStoreApps(ctx, prevCache, logf) {
+				changed = true
 			}
-			return cached, nil
+			if changed {
+				_ = SaveLibraryCache(prevCache)
+			}
+			return prevCache, nil
 		}
 	}
 
@@ -309,6 +329,17 @@ func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHist
 	if err != nil && logf != nil {
 		logf(fmt.Sprintf("Warning: owned games fetch partial error: %v", err))
 	}
+	if prevCache != nil && len(owned) < len(prevCache.Items) {
+		seen := make(map[uint32]bool, len(owned))
+		for _, it := range owned {
+			seen[it.AppID] = true
+		}
+		for _, oldIt := range prevCache.Items {
+			if !seen[oldIt.AppID] {
+				owned = append(owned, oldIt)
+			}
+		}
+	}
 
 	if logf != nil {
 		logf("Fetching Steam purchase history...")
@@ -316,6 +347,9 @@ func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHist
 	purchases, pErr := c.FetchPurchaseHistory(ctx, maxHistoryPages)
 	if pErr != nil && logf != nil {
 		logf(fmt.Sprintf("Warning: purchase history fetch error: %v", pErr))
+	}
+	if len(purchases) == 0 && prevCache != nil && len(prevCache.Purchases) > 0 {
+		purchases = prevCache.Purchases
 	}
 
 	if logf != nil {
@@ -325,13 +359,12 @@ func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHist
 	if lErr != nil && logf != nil {
 		logf(fmt.Sprintf("Warning: account licenses fetch error: %v", lErr))
 	}
+	if len(licenses) == 0 && prevCache != nil && len(prevCache.Licenses) > 0 {
+		licenses = prevCache.Licenses
+	}
 
 	merged := MergeLibraryWithPurchases(owned, purchases, licenses)
 
-	steamID := ""
-	if c.session != nil {
-		steamID = c.session.SteamID64
-	}
 	cache := &LibraryCache{
 		SteamID64: steamID,
 		UpdatedAt: time.Now(),
@@ -341,6 +374,73 @@ func (c *Client) SyncFullLibrary(ctx context.Context, forceRefresh bool, maxHist
 	}
 	_ = SaveLibraryCache(cache)
 	return cache, nil
+}
+
+// syncNewlyAddedStoreApps checks /dynamicstore/userdata/ for any newly acquired AppIDs not yet present
+// in the cached library, and enriches/merges them when new items are found.
+func (c *Client) syncNewlyAddedStoreApps(ctx context.Context, cache *LibraryCache, logf func(string)) bool {
+	if c.session == nil || (c.httpClient.Transport == nil && !strings.Contains(c.session.SteamLoginSecure, ".")) {
+		return false
+	}
+	dsApps, err := c.fetchDynamicStoreOwnedApps(ctx)
+	if err != nil || len(dsApps) == 0 {
+		return false
+	}
+	itemsByApp := make(map[uint32]models.LibraryItem, len(cache.Items))
+	for _, it := range cache.Items {
+		itemsByApp[it.AppID] = it
+	}
+	newCount := 0
+	for _, appID := range dsApps {
+		if _, exists := itemsByApp[appID]; !exists {
+			itemsByApp[appID] = models.LibraryItem{
+				AppID:           appID,
+				Name:            fmt.Sprintf("App %d", appID),
+				AcquisitionType: models.AcquisitionUnknown,
+			}
+			newCount++
+		}
+	}
+	if newCount == 0 {
+		return false
+	}
+	if logf != nil {
+		logf(fmt.Sprintf("Detected %d newly added app(s) on Steam; syncing new items...", newCount))
+	}
+	EnrichFromLocalSteamCache(itemsByApp, "")
+	c.bulkEnrichStoreItems(ctx, itemsByApp)
+
+	if lics, lErr := c.FetchAccountLicenses(ctx); lErr == nil && len(lics) > 0 {
+		cache.Licenses = lics
+	}
+	if recentPurchases, pErr := c.FetchPurchaseHistory(ctx, 1); pErr == nil && len(recentPurchases) > 0 {
+		existingTx := make(map[string]bool, len(cache.Purchases))
+		for _, p := range cache.Purchases {
+			if p.TransactionID != "" {
+				existingTx[p.TransactionID] = true
+			}
+		}
+		var newPurchases []models.PurchaseRecord
+		for _, rp := range recentPurchases {
+			if rp.TransactionID != "" && !existingTx[rp.TransactionID] {
+				newPurchases = append(newPurchases, rp)
+			}
+		}
+		if len(newPurchases) > 0 {
+			cache.Purchases = append(newPurchases, cache.Purchases...)
+		}
+	}
+
+	allItems := make([]models.LibraryItem, 0, len(itemsByApp))
+	for _, it := range itemsByApp {
+		allItems = append(allItems, it)
+	}
+	sort.Slice(allItems, func(i, j int) bool {
+		return strings.ToLower(allItems[i].Name) < strings.ToLower(allItems[j].Name)
+	})
+	cache.Items = MergeLibraryWithPurchases(allItems, cache.Purchases, cache.Licenses)
+	cache.UpdatedAt = time.Now()
+	return true
 }
 
 // migrateCachedOutgoingGifts upgrades a previously saved LibraryCache if any "Gift Purchase ..." rows

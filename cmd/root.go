@@ -57,18 +57,18 @@ func requireSession(ctx context.Context) (*auth.Session, error) {
 }
 
 // requireSessionOrCached returns a valid session, or an existing cached session if forceRefresh is false
-// and a local library cache already exists.
+// and a complete local library cache already exists.
 func requireSessionOrCached(ctx context.Context, forceRefresh bool) (*auth.Session, error) {
 	if !forceRefresh {
 		if sess, err := auth.LoadSession(); err == nil && sess != nil && sess.SteamID64 != "" {
 			if sess.IsValid() {
 				return sess, nil
 			}
-			if cached, err := steam.LoadLibraryCache(sess.SteamID64); err == nil && len(cached.Items) > 0 {
+			if cached, err := steam.LoadLibraryCache(sess.SteamID64); err == nil && len(cached.Items) > 0 && (len(cached.Purchases) > 0 || len(cached.Licenses) > 0) {
 				return sess, nil
 			}
 		}
-		if cached, err := steam.LoadLibraryCache(""); err == nil && len(cached.Items) > 0 && cached.SteamID64 != "" {
+		if cached, err := steam.LoadLibraryCache(""); err == nil && len(cached.Items) > 0 && cached.SteamID64 != "" && (len(cached.Purchases) > 0 || len(cached.Licenses) > 0) {
 			acctID, _ := auth.SteamID64ToAccountID(cached.SteamID64)
 			return &auth.Session{
 				SteamID64:   cached.SteamID64,

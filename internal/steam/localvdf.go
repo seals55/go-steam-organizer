@@ -253,6 +253,7 @@ func parseAppInfoVDF(
 	}
 
 	enrichedCount := 0
+	visited := make(map[uint32]bool, len(itemsByApp))
 	entryMetaLen := 60 // infoState(4)+lastUpdated(4)+token(8)+sha1Text(20)+changeNum(4)+sha1Bin(20)
 	if version == 0x27 {
 		entryMetaLen = 40
@@ -272,6 +273,7 @@ func parseAppInfoVDF(
 		}
 
 		if existing, owned := itemsByApp[appID]; owned {
+			visited[appID] = true
 			var m map[string]any
 			if hasStringTable {
 				m, _ = parseTableBinaryVDF(appData, vdfStart, vdfEnd, strTable)
@@ -287,6 +289,18 @@ func parseAppInfoVDF(
 		}
 
 		pos = vdfEnd
+	}
+
+	// Also apply packageinfo.vdf billing types to any owned apps not yet present in appinfo.vdf
+	for appID, existing := range itemsByApp {
+		if visited[appID] {
+			continue
+		}
+		if appFreePkg[appID] || appPaidPkg[appID] || appRetailPkg[appID] {
+			applyAppInfoToLibraryItem(&existing, nil, appFreePkg[appID], appPaidPkg[appID], appRetailPkg[appID])
+			itemsByApp[appID] = existing
+			enrichedCount++
+		}
 	}
 	return enrichedCount
 }

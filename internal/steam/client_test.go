@@ -181,6 +181,79 @@ func TestClientFullSyncAndMetadataEnrichment(t *testing.T) {
 	}
 }
 
+func TestSyncNewlyAddedStoreAppsWithoutForceRefresh(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("STEAM_PATH", tmpHome)
+
+	dynamicApps := `[1145350]`
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dynamicstore/userdata/":
+			_, _ = fmt.Fprintf(w, `{"rgOwnedApps":%s,"rgOwnedPackages":[1]}`, dynamicApps)
+		case "/IStoreBrowseService/GetItems/v1/":
+			_, _ = fmt.Fprint(w, `{
+				"response": {
+					"store_items": [
+						{"appid": 4315610, "name": "Guns & Thorns", "is_free": true}
+					]
+				}
+			}`)
+		case "/account/licenses/":
+			_, _ = fmt.Fprint(w, sampleLicensesHTML)
+		case "/account/history/":
+			_, _ = fmt.Fprint(w, `<table class="wallet_history_table"></table>`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	sess := &auth.Session{
+		SteamID64:        "76561198000000001",
+		AccountID:        39734273,
+		SteamLoginSecure: "76561198000000001||token",
+		WebAPIToken:      "token",
+		ExpiresAt:        time.Now().Add(time.Hour),
+	}
+	client := NewClient(sess)
+	client.SetHTTPClient(newHandlerHTTPClient(handler))
+
+	// Save initial cache with 1 item and 1 license
+	_ = SaveLibraryCache(&LibraryCache{
+		SteamID64: sess.SteamID64,
+		UpdatedAt: time.Now(),
+		Items: []models.LibraryItem{
+			{AppID: 1145350, Name: "Hades II", AcquisitionType: models.AcquisitionPurchase},
+		},
+		Licenses: []models.LicenseRecord{
+			{ItemName: "Hades II", AcquisitionMethod: "Steam Store", AcquisitionType: models.AcquisitionPurchase},
+		},
+	})
+
+	// Now simulate claiming a new free game (4315610) and running organize without --refresh
+	dynamicApps = `[1145350, 4315610]`
+	updatedCache, err := client.SyncFullLibrary(t.Context(), false, 5, func(string) {})
+	if err != nil {
+		t.Fatalf("SyncFullLibrary failed: %v", err)
+	}
+	if len(updatedCache.Items) != 2 {
+		t.Fatalf("expected 2 items after incremental dynamicstore sync, got %d", len(updatedCache.Items))
+	}
+	var foundNewFreebie bool
+	for _, it := range updatedCache.Items {
+		if it.AppID == 4315610 {
+			foundNewFreebie = true
+			if it.Name != "Guns & Thorns" || !it.IsFree || it.AcquisitionType != models.AcquisitionFree {
+				t.Errorf("expected App 4315610 to be resolved as Free ('Guns & Thorns'), got %+v", it)
+			}
+		}
+	}
+	if !foundNewFreebie {
+		t.Errorf("expected newly added AppID 4315610 in updatedCache")
+	}
+}
+
 func TestParseCommunityGamesHTML(t *testing.T) {
 	html := `<script>var rgGames = [{"appid":730,"name":"Counter-Strike 2","hours_forever":"12.5","last_played":1700000000}];</script>`
 	items := parseCommunityGamesHTML(html)

@@ -69,6 +69,48 @@ func TestParseSteamLoginSecure(t *testing.T) {
 	if _, _, _, err := ParseSteamLoginSecure("notanumber||token"); err == nil {
 		t.Errorf("expected error for non-numeric steamid")
 	}
+
+	// Verify non-store subdomain JWTs (like checkout.steampowered.com with aud=["web:checkout"]) are rejected
+	checkoutPayload, _ := json.Marshal(map[string]any{
+		"sub": "76561198000000001",
+		"exp": futureExp,
+		"aud": []string{"web:checkout"},
+	})
+	checkoutJWT := fmt.Sprintf("eyJhbGciOiJFZERTQSJ9.%s.sig", base64.RawURLEncoding.EncodeToString(checkoutPayload))
+	if _, _, _, err := ParseSteamLoginSecure("76561198000000001||" + checkoutJWT); err == nil {
+		t.Errorf("expected error for non-store audience web:checkout")
+	}
+	checkoutSess := &Session{
+		SteamID64:        "76561198000000001",
+		SteamLoginSecure: "76561198000000001||" + checkoutJWT,
+		ExpiresAt:        time.Unix(futureExp, 0),
+	}
+	if checkoutSess.IsValid() {
+		t.Errorf("expected session with web:checkout audience to be invalid")
+	}
+
+	// Verify store.steampowered.com JWT with aud=["web:store"] is accepted
+	storePayload, _ := json.Marshal(map[string]any{
+		"sub": "76561198000000001",
+		"exp": futureExp,
+		"aud": []string{"web:store"},
+	})
+	storeJWT := fmt.Sprintf("eyJhbGciOiJFZERTQSJ9.%s.sig", base64.RawURLEncoding.EncodeToString(storePayload))
+	if _, _, _, err := ParseSteamLoginSecure("76561198000000001||" + storeJWT); err != nil {
+		t.Errorf("expected web:store audience to succeed, got %v", err)
+	}
+
+	// Verify extractStoreCookies ignores checkout/login subdomain steamLoginSecure cookies
+	cookies := extractStoreCookies([]cdpCookie{
+		{Name: "steamLoginSecure", Value: "store_cookie_val", Domain: "store.steampowered.com"},
+		{Name: "sessionid", Value: "store_sess_id", Domain: "store.steampowered.com"},
+		{Name: "steamLoginSecure", Value: "checkout_cookie_val", Domain: "checkout.steampowered.com"},
+		{Name: "sessionid", Value: "checkout_sess_id", Domain: "checkout.steampowered.com"},
+		{Name: "browserid", Value: "shared_browser_id", Domain: ".steampowered.com"},
+	})
+	if cookies["steamLoginSecure"] != "store_cookie_val" || cookies["sessionid"] != "store_sess_id" || cookies["browserid"] != "shared_browser_id" {
+		t.Errorf("unexpected extracted store cookies: %+v", cookies)
+	}
 }
 
 func TestSessionLifecycleAndValidity(t *testing.T) {

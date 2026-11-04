@@ -218,7 +218,7 @@ func loginWithCDP(ctx context.Context, browserPath string, logf func(string, ...
 			}
 
 			steamID64, jwtToken, expiresAt, parseErr := ParseSteamLoginSecure(loginSecure)
-			if parseErr != nil {
+			if parseErr != nil || time.Now().After(expiresAt.Add(-5*time.Minute)) {
 				continue
 			}
 
@@ -227,7 +227,6 @@ func loginWithCDP(ctx context.Context, browserPath string, logf func(string, ...
 				continue
 			}
 
-			logf("Detected authenticated Steam session for %s! Finalizing...", steamID64)
 			sess := &Session{
 				SteamID64:        steamID64,
 				AccountID:        accountID,
@@ -238,6 +237,11 @@ func loginWithCDP(ctx context.Context, browserPath string, logf func(string, ...
 				ExpiresAt:        expiresAt,
 				CreatedAt:        time.Now(),
 			}
+			if !verifyStoreSession(ctx, sess) {
+				_ = deleteCDPStoreLoginCookie(wsURL)
+				continue
+			}
+			logf("Detected authenticated Steam session for %s! Finalizing...", steamID64)
 			return sess, nil
 		}
 	}
@@ -291,6 +295,31 @@ func waitForCDPWebSocket(ctx context.Context, port int) (string, error) {
 
 var cdpMsgID atomic.Int64
 
+type cdpCookie struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+}
+
+func extractStoreCookies(cookies []cdpCookie) map[string]string {
+	result := make(map[string]string)
+	for _, c := range cookies {
+		domain := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Domain), "."))
+		if domain == "store.steampowered.com" {
+			result[c.Name] = c.Value
+		} else if domain == "steampowered.com" {
+			// Only use root-domain cookies as fallback for non-auth cookies (e.g. browserid, steamCountry),
+			// and never accept steamLoginSecure or sessionid from non-store subdomains (like checkout.steampowered.com).
+			if c.Name != "steamLoginSecure" && c.Name != "sessionid" {
+				if _, exists := result[c.Name]; !exists {
+					result[c.Name] = c.Value
+				}
+			}
+		}
+	}
+	return result
+}
+
 func fetchCDPCookies(wsURL string) (map[string]string, error) {
 	origin := "http://127.0.0.1/"
 	ws, err := websocket.Dial(wsURL, "", origin)
@@ -313,11 +342,7 @@ func fetchCDPCookies(wsURL string) (map[string]string, error) {
 		var resp struct {
 			ID     int64 `json:"id"`
 			Result struct {
-				Cookies []struct {
-					Name   string `json:"name"`
-					Value  string `json:"value"`
-					Domain string `json:"domain"`
-				} `json:"cookies"`
+				Cookies []cdpCookie `json:"cookies"`
 			} `json:"result"`
 		}
 		if err := websocket.JSON.Receive(ws, &resp); err != nil {
@@ -326,14 +351,37 @@ func fetchCDPCookies(wsURL string) (map[string]string, error) {
 		if resp.ID != id {
 			continue
 		}
-		result := make(map[string]string)
-		for _, c := range resp.Result.Cookies {
-			if strings.Contains(c.Domain, "steampowered.com") {
-				result[c.Name] = c.Value
-			}
-		}
-		return result, nil
+		return extractStoreCookies(resp.Result.Cookies), nil
 	}
+}
+
+func deleteCDPStoreLoginCookie(wsURL string) error {
+	origin := "http://127.0.0.1/"
+	ws, err := websocket.Dial(wsURL, "", origin)
+	if err != nil {
+		return err
+	}
+	defer ws.Close()
+	_ = ws.SetDeadline(time.Now().Add(2 * time.Second))
+
+	id := cdpMsgID.Add(1)
+	req := map[string]any{
+		"id":     id,
+		"method": "Network.deleteCookies",
+		"params": map[string]any{
+			"name":   "steamLoginSecure",
+			"domain": "store.steampowered.com",
+		},
+	}
+	return websocket.JSON.Send(ws, req)
+}
+
+func verifyStoreSession(ctx context.Context, sess *Session) bool {
+	if sess == nil || sess.SteamLoginSecure == "" {
+		return false
+	}
+	enrichSessionMetadata(ctx, sess)
+	return sess.PersonaName != "" && !strings.HasPrefix(sess.PersonaName, "SteamUser_")
 }
 
 // newPortalMux creates the HTTP handler for the local browser login callback portal.

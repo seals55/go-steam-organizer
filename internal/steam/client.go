@@ -88,6 +88,13 @@ func (c *Client) GetStore(ctx context.Context, pathOrURL string) ([]byte, error)
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, target)
 	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalPath := strings.ToLower(resp.Request.URL.Path)
+		reqLower := strings.ToLower(pathOrURL)
+		if strings.Contains(finalPath, "/login") && !strings.Contains(reqLower, "/login") {
+			return nil, fmt.Errorf("Steam Store session expired or unauthorized (redirected to %s); run 'steam-organizer login --force' to re-authenticate", resp.Request.URL.Path)
+		}
+	}
 	return io.ReadAll(resp.Body)
 }
 
@@ -118,6 +125,13 @@ func (c *Client) PostStoreForm(ctx context.Context, pathOrURL string, form url.V
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, target)
+	}
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalPath := strings.ToLower(resp.Request.URL.Path)
+		reqLower := strings.ToLower(pathOrURL)
+		if strings.Contains(finalPath, "/login") && !strings.Contains(reqLower, "/login") {
+			return nil, fmt.Errorf("Steam Store session expired or unauthorized (redirected to %s); run 'steam-organizer login --force' to re-authenticate", resp.Request.URL.Path)
+		}
 	}
 	return io.ReadAll(resp.Body)
 }
